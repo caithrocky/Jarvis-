@@ -1,0 +1,9 @@
+{
+  "name": "JARVIS AI",
+  "description": "Futuristic AI financial intelligence assistant, market analyzer, and voice-activated trading companion.",
+  "requestFramePermissions": [
+    "RECORD_AUDIO",
+    "POST_NOTIFICATIONS"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

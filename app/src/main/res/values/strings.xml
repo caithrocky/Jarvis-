@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">JARVIS AI</string>
+    <string name="voice_service_channel_name">JARVIS Voice Listener</string>
+    <string name="voice_service_channel_desc">Persistent notification while JARVIS always-on wake-word listener is active</string>
+    <string name="market_alerts_channel_name">JARVIS Market Alerts</string>
+    <string name="market_alerts_channel_desc">Price breakouts, economic events, and trade execution alerts</string>
+    <string name="orb_content_description">JARVIS AI core visualization orb</string>
+</resources>
