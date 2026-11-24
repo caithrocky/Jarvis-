@@ -7,6 +7,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import com.example.ui.JarvisApp
+import com.example.updates.JarvisUpdatePrompt
 import com.example.ui.JarvisViewModel
 
 class MainActivity : ComponentActivity() {
@@ -19,6 +20,7 @@ class MainActivity : ComponentActivity() {
         intent?.data?.let { viewModel.handleDeepLink(it) }
         setContent {
             JarvisApp(viewModel = viewModel)
+            JarvisUpdatePrompt()
         }
     }
 
