@@ -113,10 +113,31 @@ class NewsAndCalendarRepository(private val httpClient: OkHttpClient) {
         sorted to errMsg
     }
 
+    suspend fun testFinnhubConnection(): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        val key = SecretsConfig.finnhubApiKey
+            ?: return@withContext false to "FINNHUB_API_KEY not set in Secrets."
+        runCatching {
+            val req = Request.Builder()
+                .url("https://finnhub.io/api/v1/news?category=forex&token=$key")
+                .get()
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    true to "Connected (Finnhub Live News API)"
+                } else {
+                    val err = resp.body?.string()?.take(120).orEmpty()
+                    false to "Finnhub HTTP ${resp.code}: $err"
+                }
+            }
+        }.getOrElse {
+            false to "Finnhub unreachable: ${it.message ?: "Network error"}"
+        }
+    }
+
     suspend fun fetchEconomicCalendar(): Pair<List<EconomicEvent>, String?> = withContext(Dispatchers.IO) {
         val finnhubKey = SecretsConfig.finnhubApiKey
             ?: return@withContext emptyList<EconomicEvent>() to
-                "Economic calendar requires FINNHUB_API_KEY in AI Studio Secrets (free tier at finnhub.io)."
+                "Economic calendar requires FINNHUB_API_KEY in AI Studio Secrets."
 
         runCatching {
             val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US)
@@ -126,6 +147,10 @@ class NewsAndCalendarRepository(private val httpClient: OkHttpClient) {
             val url = "https://finnhub.io/api/v1/calendar/economic?from=$from&to=$to&token=$finnhubKey"
             val req = Request.Builder().url(url).get().build()
             httpClient.newCall(req).execute().use { resp ->
+                if (resp.code == 403) {
+                    return@withContext emptyList<EconomicEvent>() to
+                        "Finnhub Live News is connected; Finnhub's /calendar/economic endpoint requires a Finnhub premium plan."
+                }
                 if (!resp.isSuccessful) {
                     val bodyErr = resp.body?.string()?.take(140) ?: "HTTP ${resp.code}"
                     return@withContext emptyList<EconomicEvent>() to "Finnhub calendar (${resp.code}): $bodyErr"

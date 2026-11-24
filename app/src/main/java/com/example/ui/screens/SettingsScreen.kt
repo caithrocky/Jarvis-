@@ -106,7 +106,7 @@ fun SettingsScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("test_nvidia_nim_btn")
-                ) { Text("Test NVIDIA NIM & Supabase Connections") }
+                ) { Text("Test All Connected APIs (NIM, TTS, Supabase, Brokers, Finnhub)") }
                 uiState.diagnosticResult?.let { diag ->
                     Spacer(Modifier.height(6.dp))
                     Text(diag, style = MaterialTheme.typography.labelMedium, color = ArcCyan)
@@ -257,15 +257,17 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(api.name, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                    val isOptionalDeferred = (api.id == "mt_bridge" || api.id == "finnhub") && !api.configured
+                    val isOptionalDeferred = api.id == "finnhub" && !api.configured
                     StatusBadge(
                         text = when {
+                            api.reachable == true -> "CONNECTED"
+                            api.configured && api.reachable == false -> "CHECK ERROR"
                             api.configured -> "CONFIGURED"
-                            isOptionalDeferred -> "OPTIONAL (LATER)"
+                            isOptionalDeferred -> "OPTIONAL"
                             else -> "MISSING KEY"
                         },
                         color = when {
-                            api.configured -> ProfitEmerald
+                            api.reachable == true || api.configured && api.reachable != false -> ProfitEmerald
                             isOptionalDeferred -> ArcCyan
                             else -> WarningAmber
                         }

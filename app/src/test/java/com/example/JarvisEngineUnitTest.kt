@@ -6,8 +6,10 @@ import com.example.analysis.TradingRiskEngine
 import com.example.domain.model.OhlcCandle
 import com.example.domain.model.RiskLimits
 import com.example.domain.model.TradingOperatingMode
+import com.example.security.SecretsConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -87,5 +89,14 @@ class JarvisEngineUnitTest {
             "EUR/USD", 50.0, 1.07, 1.10, 0, true
         )
         assertTrue(emergencyBlocked is RiskValidationResult.Blocked)
+    }
+
+    @Test
+    fun `secrets config normalizes bearer tokens, quotes, and supabase urls`() {
+        assertEquals("tok_xyz", SecretsConfig.cleanSecret("  'Bearer tok_xyz\n' "))
+        assertNull(SecretsConfig.cleanSecret("MY_SUPABASE_ANON_KEY"))
+        assertNull(SecretsConfig.cleanSecret("your_token"))
+        assertEquals("https://abc.supabase.co", SecretsConfig.normalizeHttpsUrl("abc.supabase.co/rest/v1/"))
+        assertEquals("https://abc.supabase.co", SecretsConfig.normalizeHttpsUrl("abc"))
     }
 }

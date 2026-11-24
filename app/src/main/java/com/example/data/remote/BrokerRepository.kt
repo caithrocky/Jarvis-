@@ -43,6 +43,9 @@ class BrokerRepository(
     @Volatile
     private var lastDerivCurrency: String = "USD"
 
+    @Volatile
+    private var activeBinanceBaseUrl: String = BINANCE_MAINNET_HOSTS.first()
+
     fun buildDerivOAuthUrl(): String? {
         val appId = SecretsConfig.derivAppId ?: return null
         return "https://oauth.deriv.com/oauth2/authorize?app_id=$appId&l=EN&brand=deriv"
@@ -96,16 +99,16 @@ class BrokerRepository(
                         permissions = listOf("Read", "Trade (OAuth / Token)"),
                         isConnected = false,
                         statusMessage = if (oauthReady) {
-                            "Tap 'Deriv OAuth' below or configure DERIV_API_TOKEN in Secrets."
+                            "App ID loaded — tap 'Deriv OAuth' below or configure DERIV_API_TOKEN in Secrets."
                         } else {
-                            "Configure DERIV_APP_ID (for OAuth) or DERIV_API_TOKEN in AI Studio Secrets."
+                            "Configure DERIV_APP_ID / DERIV_API_TOKEN in AI Studio Secrets."
                         },
                         lastSyncMs = null
                     )
                 )
             }
 
-            // 2. Binance Spot Account
+            // 2. Binance Spot Account (Mainnet with clock-sync & mirror fallback + Testnet detection)
             val binanceKey = SecretsConfig.binanceApiKey
             val binanceSecret = SecretsConfig.binanceApiSecret
             if (binanceKey != null && binanceSecret != null) {
@@ -125,13 +128,13 @@ class BrokerRepository(
                         availableBalance = null,
                         permissions = listOf("Read", "Spot Trade (Withdrawal Forbidden)"),
                         isConnected = false,
-                        statusMessage = "Configure BINANCE_API_KEY & BINANCE_API_SECRET in AI Studio Secrets (Spot & Read only).",
+                        statusMessage = "Configure BINANCE_API_KEY & BINANCE_API_SECRET in AI Studio Secrets.",
                         lastSyncMs = null
                     )
                 )
             }
 
-            // 3. MetaTrader 4 / 5 Bridge (Optional — deferred if user fills later)
+            // 3. MetaTrader 4 / 5 Bridge (Only shown when configured by the user)
             val mtUrl = SecretsConfig.mtBridgeUrl
             val mtToken = SecretsConfig.mtBridgeToken
             if (mtUrl != null && mtToken != null) {
@@ -139,22 +142,6 @@ class BrokerRepository(
                 accounts.addAll(mtData.accounts)
                 positions.addAll(mtData.positions)
                 history.addAll(mtData.tradeHistorySummary)
-            } else {
-                accounts.add(
-                    BrokerAccountInfo(
-                        id = "mt_deferred",
-                        brokerType = BrokerType.MT_BRIDGE,
-                        accountCode = "Optional • Fill Later",
-                        environment = AccountEnvironment.DEMO,
-                        currency = "USD",
-                        balance = null,
-                        availableBalance = null,
-                        permissions = listOf("Account Info", "Positions", "Bridge Order Dispatch"),
-                        isConnected = false,
-                        statusMessage = "Deferred for later setup — add MT_BRIDGE_URL & MT_BRIDGE_TOKEN in Secrets whenever ready.",
-                        lastSyncMs = null
-                    )
-                )
             }
 
             BrokerSyncResult(accounts, positions, history)
@@ -176,12 +163,23 @@ class BrokerRepository(
     private suspend fun fetchDerivAccountData(token: String): BrokerSyncResult {
         val appId = SecretsConfig.derivAppId ?: "1089"
         val url = "wss://ws.derivws.com/websockets/v3?app_id=$appId"
-        return withTimeoutOrNull(9000L) {
+        val accounts = mutableListOf<BrokerAccountInfo>()
+        val positions = mutableListOf<OpenPosition>()
+        val history = mutableListOf<String>()
+
+        val wsResult = withTimeoutOrNull(15_000L) {
             suspendCancellableCoroutine { cont ->
                 var completed = false
-                val accounts = mutableListOf<BrokerAccountInfo>()
-                val positions = mutableListOf<OpenPosition>()
-                val history = mutableListOf<String>()
+                var authorized = false
+
+                fun finish() {
+                    if (!completed) {
+                        completed = true
+                        if (cont.isActive) {
+                            cont.resume(BrokerSyncResult(accounts.toList(), positions.toList(), history.toList()))
+                        }
+                    }
+                }
 
                 val listener = object : WebSocketListener() {
                     override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -194,32 +192,39 @@ class BrokerRepository(
                             val msgType = json.optString("msg_type")
                             val errorObj = json.optJSONObject("error")
                             if (errorObj != null) {
-                                accounts.clear()
-                                accounts.add(
-                                    BrokerAccountInfo(
-                                        id = "deriv_err",
-                                        brokerType = BrokerType.DERIV,
-                                        accountCode = "Auth Error",
-                                        environment = AccountEnvironment.DEMO,
-                                        currency = "USD",
-                                        balance = null,
-                                        availableBalance = null,
-                                        permissions = emptyList(),
-                                        isConnected = false,
-                                        statusMessage = errorObj.optString("message", "Deriv authorization failed"),
-                                        lastSyncMs = System.currentTimeMillis()
+                                // Only mark disconnected if authorize itself failed;
+                                // follow-up portfolio/profit_table scope restrictions shouldn't invalidate auth.
+                                if (!authorized) {
+                                    accounts.clear()
+                                    accounts.add(
+                                        BrokerAccountInfo(
+                                            id = "deriv_err",
+                                            brokerType = BrokerType.DERIV,
+                                            accountCode = "Auth Error",
+                                            environment = AccountEnvironment.DEMO,
+                                            currency = "USD",
+                                            balance = null,
+                                            availableBalance = null,
+                                            permissions = emptyList(),
+                                            isConnected = false,
+                                            statusMessage = errorObj.optString("message", "Deriv authorization failed"),
+                                            lastSyncMs = System.currentTimeMillis()
+                                        )
                                     )
-                                )
-                                if (!completed) {
-                                    completed = true
                                     webSocket.close(1000, "Error")
-                                    if (cont.isActive) cont.resume(BrokerSyncResult(accounts, positions, history))
+                                    finish()
+                                } else if (msgType == "portfolio") {
+                                    webSocket.send(JSONObject().put("profit_table", 1).put("limit", 10).toString())
+                                } else {
+                                    webSocket.close(1000, "Synced")
+                                    finish()
                                 }
                                 return
                             }
 
                             when (msgType) {
                                 "authorize" -> {
+                                    authorized = true
                                     val auth = json.getJSONObject("authorize")
                                     val loginId = auth.optString("loginid", "DERIV")
                                     val isVirtual = auth.optInt("is_virtual", 1) == 1 || loginId.startsWith("VRTC")
@@ -297,19 +302,15 @@ class BrokerRepository(
                                             history.add("Deriv ${t.optString("shortcode")}: PnL ${"%+.2f".format(sell - buy)}")
                                         }
                                     }
-                                    if (!completed) {
-                                        completed = true
-                                        webSocket.close(1000, "Synced")
-                                        if (cont.isActive) cont.resume(BrokerSyncResult(accounts, positions, history))
-                                    }
+                                    webSocket.close(1000, "Synced")
+                                    finish()
                                 }
                             }
                         }
                     }
 
                     override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                        if (!completed) {
-                            completed = true
+                        if (!authorized) {
                             accounts.add(
                                 BrokerAccountInfo(
                                     id = "deriv_net_err",
@@ -325,14 +326,20 @@ class BrokerRepository(
                                     lastSyncMs = System.currentTimeMillis()
                                 )
                             )
-                            if (cont.isActive) cont.resume(BrokerSyncResult(accounts, positions, history))
                         }
+                        finish()
                     }
                 }
                 val ws = httpClient.newWebSocket(Request.Builder().url(url).build(), listener)
                 cont.invokeOnCancellation { ws.cancel() }
             }
-        } ?: BrokerSyncResult(
+        }
+
+        if (wsResult != null) return wsResult
+        if (accounts.any { it.isConnected }) {
+            return BrokerSyncResult(accounts.toList(), positions.toList(), history.toList())
+        }
+        return BrokerSyncResult(
             accounts = listOf(
                 BrokerAccountInfo(
                     id = "deriv_timeout",
@@ -344,7 +351,7 @@ class BrokerRepository(
                     availableBalance = null,
                     permissions = emptyList(),
                     isConnected = false,
-                    statusMessage = "Deriv WebSocket timed out.",
+                    statusMessage = "Deriv WebSocket timed out (app_id=$appId).",
                     lastSyncMs = System.currentTimeMillis()
                 )
             ),
@@ -358,33 +365,35 @@ class BrokerRepository(
         apiSecret: String,
         spotPricesUsd: Map<String, Double>
     ): BrokerSyncResult {
-        return runCatching {
-            val timestamp = System.currentTimeMillis()
-            val query = "timestamp=$timestamp&recvWindow=10000"
-            val signature = hmacSha256(apiSecret, query)
-            val url = "https://api.binance.com/api/v3/account?$query&signature=$signature"
-            val req = Request.Builder()
-                .url(url)
-                .header("X-MBX-APIKEY", apiKey)
-                .get()
-                .build()
+        val candidates = BINANCE_MAINNET_HOSTS.map { it to AccountEnvironment.LIVE } +
+            listOf(BINANCE_TESTNET_HOST to AccountEnvironment.DEMO)
 
-            httpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    val err = resp.body?.string()?.take(200) ?: "HTTP ${resp.code}"
+        var lastError = "Network error"
+        for ((baseUrl, env) in candidates) {
+            val attempt = queryBinanceAccountOnHost(baseUrl, env, apiKey, apiSecret, spotPricesUsd)
+            when (attempt) {
+                is BinanceHostAttempt.Success -> {
+                    activeBinanceBaseUrl = baseUrl
+                    return attempt.result
+                }
+                is BinanceHostAttempt.RetryNextHost -> {
+                    lastError = attempt.reason
+                    continue
+                }
+                is BinanceHostAttempt.Fatal -> {
                     return BrokerSyncResult(
                         accounts = listOf(
                             BrokerAccountInfo(
                                 id = "binance_err",
                                 brokerType = BrokerType.BINANCE,
                                 accountCode = "Auth Error",
-                                environment = AccountEnvironment.LIVE,
+                                environment = env,
                                 currency = "USDT",
                                 balance = null,
                                 availableBalance = null,
                                 permissions = emptyList(),
                                 isConnected = false,
-                                statusMessage = "Binance API error: $err",
+                                statusMessage = attempt.reason,
                                 lastSyncMs = System.currentTimeMillis()
                             )
                         ),
@@ -392,8 +401,82 @@ class BrokerRepository(
                         tradeHistorySummary = emptyList()
                     )
                 }
+            }
+        }
 
-                val json = JSONObject(resp.body?.string().orEmpty())
+        return BrokerSyncResult(
+            accounts = listOf(
+                BrokerAccountInfo(
+                    id = "binance_fail",
+                    brokerType = BrokerType.BINANCE,
+                    accountCode = "Unreachable",
+                    environment = AccountEnvironment.LIVE,
+                    currency = "USDT",
+                    balance = null,
+                    availableBalance = null,
+                    permissions = emptyList(),
+                    isConnected = false,
+                    statusMessage = "Binance connection error: $lastError",
+                    lastSyncMs = System.currentTimeMillis()
+                )
+            ),
+            positions = emptyList(),
+            tradeHistorySummary = emptyList()
+        )
+    }
+
+    private sealed class BinanceHostAttempt {
+        data class Success(val result: BrokerSyncResult) : BinanceHostAttempt()
+        data class RetryNextHost(val reason: String) : BinanceHostAttempt()
+        data class Fatal(val reason: String) : BinanceHostAttempt()
+    }
+
+    private fun fetchBinanceServerTimestamp(baseUrl: String): Long {
+        val localNow = System.currentTimeMillis()
+        return runCatching {
+            val req = Request.Builder().url("$baseUrl/api/v3/time").get().build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@runCatching localNow
+                val serverTime = JSONObject(resp.body?.string().orEmpty()).optLong("serverTime", 0L)
+                if (serverTime > 0L) serverTime else localNow
+            }
+        }.getOrDefault(localNow)
+    }
+
+    private fun queryBinanceAccountOnHost(
+        baseUrl: String,
+        env: AccountEnvironment,
+        apiKey: String,
+        apiSecret: String,
+        spotPricesUsd: Map<String, Double>
+    ): BinanceHostAttempt {
+        return runCatching {
+            val timestamp = fetchBinanceServerTimestamp(baseUrl)
+            val query = "timestamp=$timestamp&recvWindow=50000"
+            val signature = hmacSha256(apiSecret, query)
+            val url = "$baseUrl/api/v3/account?$query&signature=$signature"
+            val req = Request.Builder()
+                .url(url)
+                .header("X-MBX-APIKEY", apiKey)
+                .get()
+                .build()
+
+            httpClient.newCall(req).execute().use { resp ->
+                val rawBody = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) {
+                    val code = runCatching { JSONObject(rawBody).optInt("code", 0) }.getOrDefault(0)
+                    val msg = runCatching { JSONObject(rawBody).optString("msg") }
+                        .getOrNull()?.takeIf { it.isNotBlank() } ?: "HTTP ${resp.code}"
+
+                    // HTTP 451 (geo restriction on emulator IP) or -2015 on mainnet -> try mirrors / testnet
+                    if (resp.code == 451 || resp.code >= 500 || code == -2015 || resp.code == 401) {
+                        val suffix = if (resp.code == 451) " (HTTP 451 region-restricted IP)" else " ($msg)"
+                        return BinanceHostAttempt.RetryNextHost("Binance ${env.label}$suffix")
+                    }
+                    return BinanceHostAttempt.Fatal("Binance API error: $msg")
+                }
+
+                val json = JSONObject(rawBody)
                 val canTrade = json.optBoolean("canTrade", false)
                 val balances = json.optJSONArray("balances") ?: JSONArray()
                 var estimatedTotalUsd = 0.0
@@ -422,50 +505,35 @@ class BrokerRepository(
                     if (canTrade) add("Spot Trade")
                 }
 
-                BrokerSyncResult(
-                    accounts = listOf(
-                        BrokerAccountInfo(
-                            id = "binance_spot",
-                            brokerType = BrokerType.BINANCE,
-                            accountCode = "SPOT-${apiKey.take(6)}***",
-                            environment = AccountEnvironment.LIVE,
-                            currency = "USDT",
-                            balance = estimatedTotalUsd,
-                            availableBalance = usdtFree,
-                            permissions = perms,
-                            isConnected = true,
-                            statusMessage = if (nonZeroAssets.isEmpty()) {
-                                "Connected (0.00 USDT balance)"
-                            } else {
-                                "Holdings: ${nonZeroAssets.take(4).joinToString(" • ")}"
-                            },
-                            lastSyncMs = System.currentTimeMillis()
-                        )
-                    ),
-                    positions = emptyList(),
-                    tradeHistorySummary = nonZeroAssets.map { "Binance Spot Holding: $it" }
+                val envPrefix = if (env == AccountEnvironment.DEMO) "Spot Testnet" else "Spot"
+                BinanceHostAttempt.Success(
+                    BrokerSyncResult(
+                        accounts = listOf(
+                            BrokerAccountInfo(
+                                id = "binance_${env.name.lowercase()}",
+                                brokerType = BrokerType.BINANCE,
+                                accountCode = "$envPrefix-${apiKey.take(6)}***",
+                                environment = env,
+                                currency = "USDT",
+                                balance = estimatedTotalUsd,
+                                availableBalance = usdtFree,
+                                permissions = perms,
+                                isConnected = true,
+                                statusMessage = if (nonZeroAssets.isEmpty()) {
+                                    "Connected to $envPrefix (0.00 USDT)"
+                                } else {
+                                    "$envPrefix Holdings: ${nonZeroAssets.take(4).joinToString(" • ")}"
+                                },
+                                lastSyncMs = System.currentTimeMillis()
+                            )
+                        ),
+                        positions = emptyList(),
+                        tradeHistorySummary = nonZeroAssets.map { "Binance $envPrefix Holding: $it" }
+                    )
                 )
             }
         }.getOrElse { ex ->
-            BrokerSyncResult(
-                accounts = listOf(
-                    BrokerAccountInfo(
-                        id = "binance_fail",
-                        brokerType = BrokerType.BINANCE,
-                        accountCode = "Error",
-                        environment = AccountEnvironment.LIVE,
-                        currency = "USDT",
-                        balance = null,
-                        availableBalance = null,
-                        permissions = emptyList(),
-                        isConnected = false,
-                        statusMessage = "Binance request failed: ${ex.message ?: "Network error"}",
-                        lastSyncMs = System.currentTimeMillis()
-                    )
-                ),
-                positions = emptyList(),
-                tradeHistorySummary = emptyList()
-            )
+            BinanceHostAttempt.RetryNextHost(ex.message ?: "Network error")
         }
     }
 
@@ -578,7 +646,7 @@ class BrokerRepository(
         val appId = SecretsConfig.derivAppId ?: "1089"
         val url = "wss://ws.derivws.com/websockets/v3?app_id=$appId"
 
-        return withTimeoutOrNull(9000L) {
+        return withTimeoutOrNull(12_000L) {
             suspendCancellableCoroutine { cont ->
                 var finished = false
                 val listener = object : WebSocketListener() {
@@ -663,11 +731,11 @@ class BrokerRepository(
             return OrderExecutionResult.Failed("Binance Spot supports USDT pairs (e.g. BTC/USDT, ETH/USDT, SOL/USDT).")
         }
         return runCatching {
-            val timestamp = System.currentTimeMillis()
+            val timestamp = fetchBinanceServerTimestamp(activeBinanceBaseUrl)
             val cleanSide = if (side.equals("BUY", ignoreCase = true)) "BUY" else "SELL"
-            val params = "symbol=$binanceSym&side=$cleanSide&type=MARKET&quoteOrderQty=${"%.2f".format(amountUsd)}&recvWindow=10000&timestamp=$timestamp"
+            val params = "symbol=$binanceSym&side=$cleanSide&type=MARKET&quoteOrderQty=${"%.2f".format(amountUsd)}&recvWindow=50000&timestamp=$timestamp"
             val sig = hmacSha256(apiSecret, params)
-            val url = "https://api.binance.com/api/v3/order?$params&signature=$sig"
+            val url = "$activeBinanceBaseUrl/api/v3/order?$params&signature=$sig"
             val req = Request.Builder()
                 .url(url)
                 .header("X-MBX-APIKEY", apiKey)
@@ -695,7 +763,7 @@ class BrokerRepository(
         val baseUrl = SecretsConfig.mtBridgeUrl
         val token = SecretsConfig.mtBridgeToken
         if (baseUrl == null || token == null || !baseUrl.startsWith("https://")) {
-            return OrderExecutionResult.Failed("MT4/MT5 Bridge is optional and not configured yet.")
+            return OrderExecutionResult.Failed("MT4/MT5 Bridge is not configured.")
         }
         return runCatching {
             val body = JSONObject().apply {
@@ -740,5 +808,15 @@ class BrokerRepository(
         val mac = Mac.getInstance("HmacSHA256")
         mac.init(SecretKeySpec(secret.toByteArray(Charsets.UTF_8), "HmacSHA256"))
         return mac.doFinal(data.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+    }
+
+    companion object {
+        private val BINANCE_MAINNET_HOSTS = listOf(
+            "https://api.binance.com",
+            "https://api1.binance.com",
+            "https://api3.binance.com",
+            "https://api4.binance.com"
+        )
+        private const val BINANCE_TESTNET_HOST = "https://testnet.binance.vision"
     }
 }

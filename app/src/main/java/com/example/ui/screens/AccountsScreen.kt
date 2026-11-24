@@ -188,11 +188,29 @@ fun AccountsScreen(
                         Text("SUPABASE CLOUD BACKEND", style = MaterialTheme.typography.titleMedium)
                     }
                     StatusBadge(
-                        text = if (supabaseSignedInEmail != null) "AUTHENTICATED" else if (SecretsConfig.hasSupabase) "READY" else "UNCONFIGURED",
-                        color = if (supabaseSignedInEmail != null) ProfitEmerald else jc.mutedSlate
+                        text = when {
+                            supabaseSignedInEmail != null -> "AUTHENTICATED"
+                            uiState.supabaseReachable == true -> "CONNECTED"
+                            uiState.supabaseReachable == false && SecretsConfig.hasSupabase -> "ERROR"
+                            SecretsConfig.hasSupabase -> "READY"
+                            else -> "UNCONFIGURED"
+                        },
+                        color = when {
+                            supabaseSignedInEmail != null || uiState.supabaseReachable == true -> ProfitEmerald
+                            uiState.supabaseReachable == false && SecretsConfig.hasSupabase -> WarningAmber
+                            else -> jc.mutedSlate
+                        }
                     )
                 }
                 Spacer(Modifier.height(8.dp))
+                uiState.supabaseHealthDetail?.let { health ->
+                    Text(
+                        text = health,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (uiState.supabaseReachable == true) ArcCyan else WarningAmber
+                    )
+                    Spacer(Modifier.height(6.dp))
+                }
                 if (!SecretsConfig.hasSupabase) {
                     Text(
                         text = "Configure SUPABASE_URL and SUPABASE_ANON_KEY in AI Studio Secrets to enable PostgreSQL RLS sync and Edge Function proxying.",

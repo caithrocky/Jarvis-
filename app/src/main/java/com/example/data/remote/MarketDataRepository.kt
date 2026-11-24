@@ -275,58 +275,78 @@ class MarketDataRepository(private val httpClient: OkHttpClient) {
         val quoteVolume: Double
     )
 
-    private fun fetchBinance24hrTickers(): Map<String, BinanceTicker24h> = runCatching {
+    private val binancePublicHosts = listOf(
+        "https://data-api.binance.vision",
+        "https://api1.binance.com",
+        "https://api3.binance.com",
+        "https://api.binance.com"
+    )
+
+    private fun fetchBinance24hrTickers(): Map<String, BinanceTicker24h> {
         val symbols = supportedInstruments.mapNotNull { it.binanceSymbol }.distinct()
         if (symbols.isEmpty()) return emptyMap()
         val jsonArrayParam = JSONArray(symbols).toString()
-        val url = "https://api.binance.com/api/v3/ticker/24hr?symbols=$jsonArrayParam"
-        val request = Request.Builder().url(url).get().build()
-        httpClient.newCall(request).execute().use { resp ->
-            if (!resp.isSuccessful) return emptyMap()
-            val body = resp.body?.string() ?: return emptyMap()
-            val arr = JSONArray(body)
-            val result = mutableMapOf<String, BinanceTicker24h>()
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                val sym = obj.getString("symbol")
-                result[sym] = BinanceTicker24h(
-                    lastPrice = obj.getString("lastPrice").toDoubleOrNull() ?: 0.0,
-                    openPrice = obj.getString("openPrice").toDoubleOrNull() ?: 0.0,
-                    priceChange = obj.getString("priceChange").toDoubleOrNull() ?: 0.0,
-                    priceChangePct = obj.getString("priceChangePercent").toDoubleOrNull() ?: 0.0,
-                    highPrice = obj.getString("highPrice").toDoubleOrNull() ?: 0.0,
-                    lowPrice = obj.getString("lowPrice").toDoubleOrNull() ?: 0.0,
-                    quoteVolume = obj.getString("quoteVolume").toDoubleOrNull() ?: 0.0
-                )
-            }
-            result
-        }
-    }.getOrDefault(emptyMap())
 
-    private fun fetchBinanceKlines(symbol: String, interval: String, limit: Int): List<OhlcCandle> = runCatching {
-        val url = "https://api.binance.com/api/v3/klines?symbol=$symbol&interval=$interval&limit=$limit"
-        val request = Request.Builder().url(url).get().build()
-        httpClient.newCall(request).execute().use { resp ->
-            if (!resp.isSuccessful) return emptyList()
-            val body = resp.body?.string() ?: return emptyList()
-            val arr = JSONArray(body)
-            val list = ArrayList<OhlcCandle>(arr.length())
-            for (i in 0 until arr.length()) {
-                val item = arr.getJSONArray(i)
-                list.add(
-                    OhlcCandle(
-                        timestampMs = item.getLong(0),
-                        open = item.getString(1).toDouble(),
-                        high = item.getString(2).toDouble(),
-                        low = item.getString(3).toDouble(),
-                        close = item.getString(4).toDouble(),
-                        volume = item.getString(5).toDouble()
-                    )
-                )
-            }
-            list
+        for (host in binancePublicHosts) {
+            val parsed = runCatching {
+                val url = "$host/api/v3/ticker/24hr?symbols=$jsonArrayParam"
+                val request = Request.Builder().url(url).get().build()
+                httpClient.newCall(request).execute().use { resp ->
+                    if (!resp.isSuccessful) return@runCatching emptyMap()
+                    val body = resp.body?.string() ?: return@runCatching emptyMap()
+                    val arr = JSONArray(body)
+                    val result = mutableMapOf<String, BinanceTicker24h>()
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.getJSONObject(i)
+                        val sym = obj.getString("symbol")
+                        result[sym] = BinanceTicker24h(
+                            lastPrice = obj.getString("lastPrice").toDoubleOrNull() ?: 0.0,
+                            openPrice = obj.getString("openPrice").toDoubleOrNull() ?: 0.0,
+                            priceChange = obj.getString("priceChange").toDoubleOrNull() ?: 0.0,
+                            priceChangePct = obj.getString("priceChangePercent").toDoubleOrNull() ?: 0.0,
+                            highPrice = obj.getString("highPrice").toDoubleOrNull() ?: 0.0,
+                            lowPrice = obj.getString("lowPrice").toDoubleOrNull() ?: 0.0,
+                            quoteVolume = obj.getString("quoteVolume").toDoubleOrNull() ?: 0.0
+                        )
+                    }
+                    result
+                }
+            }.getOrDefault(emptyMap())
+            if (parsed.isNotEmpty()) return parsed
         }
-    }.getOrDefault(emptyList())
+        return emptyMap()
+    }
+
+    private fun fetchBinanceKlines(symbol: String, interval: String, limit: Int): List<OhlcCandle> {
+        for (host in binancePublicHosts) {
+            val parsed = runCatching {
+                val url = "$host/api/v3/klines?symbol=$symbol&interval=$interval&limit=$limit"
+                val request = Request.Builder().url(url).get().build()
+                httpClient.newCall(request).execute().use { resp ->
+                    if (!resp.isSuccessful) return@runCatching emptyList()
+                    val body = resp.body?.string() ?: return@runCatching emptyList()
+                    val arr = JSONArray(body)
+                    val list = ArrayList<OhlcCandle>(arr.length())
+                    for (i in 0 until arr.length()) {
+                        val item = arr.getJSONArray(i)
+                        list.add(
+                            OhlcCandle(
+                                timestampMs = item.getLong(0),
+                                open = item.getString(1).toDouble(),
+                                high = item.getString(2).toDouble(),
+                                low = item.getString(3).toDouble(),
+                                close = item.getString(4).toDouble(),
+                                volume = item.getString(5).toDouble()
+                            )
+                        )
+                    }
+                    list
+                }
+            }.getOrDefault(emptyList())
+            if (parsed.isNotEmpty()) return parsed
+        }
+        return emptyList()
+    }
 
     private suspend fun fetchDerivSnapshotBatch(derivSymbols: List<String>): Map<String, List<OhlcCandle>> =
         coroutineScope {

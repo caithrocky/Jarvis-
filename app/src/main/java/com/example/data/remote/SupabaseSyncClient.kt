@@ -45,6 +45,7 @@ class SupabaseSyncClient(
             val req = Request.Builder()
                 .url("$baseUrl/auth/v1/$path")
                 .header("apikey", anonKey)
+                .header("Authorization", "Bearer $anonKey")
                 .post(payload.toRequestBody("application/json".toMediaType()))
                 .build()
             httpClient.newCall(req).execute().use { resp ->
@@ -53,6 +54,7 @@ class SupabaseSyncClient(
                     val jsonErr = runCatching { JSONObject(body) }.getOrNull()
                     val msg = jsonErr?.optString("error_description")?.takeIf { it.isNotBlank() }
                         ?: jsonErr?.optString("msg")?.takeIf { it.isNotBlank() }
+                        ?: jsonErr?.optString("message")?.takeIf { it.isNotBlank() }
                         ?: "HTTP ${resp.code}"
                     return@withContext false to "Supabase auth failed: $msg"
                 }
@@ -85,15 +87,45 @@ class SupabaseSyncClient(
         if (baseUrl == null || anonKey == null) {
             return@withContext false to "SUPABASE_URL / SUPABASE_ANON_KEY not set in Secrets."
         }
+        if (!baseUrl.startsWith("https://") && !baseUrl.startsWith("http://")) {
+            return@withContext false to "Invalid SUPABASE_URL format."
+        }
+
+        // Check Auth settings endpoint first (requires valid project URL + apikey, works across all Supabase setups)
+        val authCheck = runCatching {
+            val req = Request.Builder()
+                .url("$baseUrl/auth/v1/settings")
+                .header("apikey", anonKey)
+                .header("Authorization", "Bearer $anonKey")
+                .get()
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    true to "Connected (${SecretsConfig.supabaseHostLabel})"
+                } else {
+                    val err = resp.body?.string()?.take(120).orEmpty()
+                    false to "Auth HTTP ${resp.code}: $err"
+                }
+            }
+        }
+        if (authCheck.getOrNull()?.first == true) {
+            return@withContext authCheck.getOrThrow()
+        }
+
+        // Fallback check on PostgREST root
         runCatching {
             val req = Request.Builder()
                 .url("$baseUrl/rest/v1/")
                 .header("apikey", anonKey)
+                .header("Authorization", "Bearer $anonKey")
                 .get()
                 .build()
             httpClient.newCall(req).execute().use { resp ->
-                if (resp.isSuccessful) true to "Supabase REST API reachable (${SecretsConfig.supabaseHostLabel})"
-                else false to "Supabase HTTP ${resp.code}"
+                if (resp.isSuccessful) {
+                    true to "Connected via REST (${SecretsConfig.supabaseHostLabel})"
+                } else {
+                    false to "Supabase HTTP ${resp.code} (${authCheck.getOrNull()?.second ?: "Check SUPABASE_ANON_KEY"})"
+                }
             }
         }.getOrElse {
             false to "Supabase unreachable: ${it.message ?: "Network error"}"

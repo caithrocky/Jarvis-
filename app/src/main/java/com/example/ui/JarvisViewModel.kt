@@ -90,6 +90,11 @@ data class JarvisUiState(
     val calendarNotice: String? = null,
     val isLoadingNews: Boolean = false,
     val apiStatuses: List<ApiIntegrationStatus> = emptyList(),
+    val nimReachable: Boolean? = null,
+    val supabaseReachable: Boolean? = null,
+    val supabaseHealthDetail: String? = null,
+    val finnhubReachable: Boolean? = null,
+    val finnhubHealthDetail: String? = null,
     val diagnosticResult: String? = null,
     val snackbarMessage: String? = null
 )
@@ -344,15 +349,23 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.update { it.copy(isLoadingNews = true) }
             val (news, newsErr) = newsRepo.fetchLiveFinancialNews()
             val (events, calNotice) = newsRepo.fetchEconomicCalendar()
+            val (fhOk, fhMsg) = if (SecretsConfig.hasFinnhub) {
+                newsRepo.testFinnhubConnection()
+            } else {
+                false to "Optional (RSS News Active)"
+            }
             _uiState.update {
                 it.copy(
                     newsItems = news,
                     newsError = newsErr,
                     economicEvents = events,
                     calendarNotice = calNotice,
+                    finnhubReachable = if (SecretsConfig.hasFinnhub) fhOk else null,
+                    finnhubHealthDetail = if (SecretsConfig.hasFinnhub) fhMsg else null,
                     isLoadingNews = false
                 )
             }
+            refreshApiStatuses()
         }
     }
 
@@ -363,11 +376,18 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 .filter { it.price > 0.0 }
                 .associate { it.symbol to it.price }
             val result = brokerRepo.syncAllBrokers(spotPrices)
+            val (supOk, supMsg) = if (SecretsConfig.hasSupabase) {
+                supabaseClient.testHealth()
+            } else {
+                false to "Not Configured"
+            }
             _uiState.update {
                 it.copy(
                     accounts = result.accounts,
                     openPositions = result.positions,
                     brokerTradeHistory = result.tradeHistorySummary,
+                    supabaseReachable = if (SecretsConfig.hasSupabase) supOk else null,
+                    supabaseHealthDetail = if (SecretsConfig.hasSupabase) supMsg else null,
                     isSyncingBrokers = false
                 )
             }
@@ -892,13 +912,34 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     fun testNvidiaNimConnection() {
         viewModelScope.launch {
-            _uiState.update { it.copy(diagnosticResult = "Testing NVIDIA NIM LLM, Magpie TTS & Supabase endpoints...") }
+            _uiState.update { it.copy(diagnosticResult = "Testing NVIDIA NIM, Magpie TTS, Supabase, Brokers & Finnhub...") }
             val (nimOk, nimMsg) = nimClient.testConnection(settings.value.selectedModelId)
             val (ttsOk, ttsMsg) = magpieTtsClient.testTtsConnection(settings.value.voicePersonality)
             val (supOk, supMsg) = supabaseClient.testHealth()
+            val (fhOk, fhMsg) = newsRepo.testFinnhubConnection()
+            val spotPrices = _uiState.value.quotes.filter { it.price > 0.0 }.associate { it.symbol to it.price }
+            val brokerResult = brokerRepo.syncAllBrokers(spotPrices)
+            val derivAcc = brokerResult.accounts.firstOrNull { it.brokerType == BrokerType.DERIV }
+            val binanceAcc = brokerResult.accounts.firstOrNull { it.brokerType == BrokerType.BINANCE }
+
             _uiState.update {
                 it.copy(
-                    diagnosticResult = "NVIDIA NIM: ${if (nimOk) "OK" else "FAIL"} ($nimMsg)\nMagpie TTS: ${if (ttsOk) "OK" else "FAIL"} ($ttsMsg)\nSupabase: ${if (supOk) "OK" else "FAIL"} ($supMsg)"
+                    accounts = brokerResult.accounts,
+                    openPositions = brokerResult.positions,
+                    brokerTradeHistory = brokerResult.tradeHistorySummary,
+                    nimReachable = nimOk,
+                    supabaseReachable = if (SecretsConfig.hasSupabase) supOk else null,
+                    supabaseHealthDetail = if (SecretsConfig.hasSupabase) supMsg else null,
+                    finnhubReachable = if (SecretsConfig.hasFinnhub) fhOk else null,
+                    finnhubHealthDetail = if (SecretsConfig.hasFinnhub) fhMsg else null,
+                    diagnosticResult = buildString {
+                        appendLine("NVIDIA NIM: ${if (nimOk) "OK" else "FAIL"} ($nimMsg)")
+                        appendLine("Magpie TTS: ${if (ttsOk) "OK" else "FAIL"} ($ttsMsg)")
+                        appendLine("Supabase: ${if (supOk) "OK" else "FAIL"} ($supMsg)")
+                        appendLine("Finnhub: ${if (fhOk) "OK" else "FAIL"} ($fhMsg)")
+                        appendLine("Deriv: ${if (derivAcc?.isConnected == true) "OK (${derivAcc.accountCode}: ${derivAcc.balance} ${derivAcc.currency})" else derivAcc?.statusMessage ?: "Not Connected"}")
+                        append("Binance: ${if (binanceAcc?.isConnected == true) "OK (${binanceAcc.accountCode}: ${binanceAcc.balance} ${binanceAcc.currency})" else binanceAcc?.statusMessage ?: "Not Connected"}")
+                    }
                 )
             }
             refreshApiStatuses()
@@ -906,69 +947,96 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun refreshApiStatuses() {
-        val statuses = listOf(
-            ApiIntegrationStatus(
-                id = "nvidia_nim",
-                name = "NVIDIA NIM Intelligence",
-                configured = SecretsConfig.hasNvidiaNim || SecretsConfig.hasSupabase,
-                reachable = null,
-                statusText = if (SecretsConfig.hasNvidiaNim) "API Key Loaded (BuildConfig)" else if (SecretsConfig.hasSupabase) "Proxied via Supabase Edge Function" else "Key Not Configured",
-                obtainGuide = "Generate a key at build.nvidia.com and configure NVIDIA_NIM_API_KEY in AI Studio Secrets.",
-                secretKeys = listOf("NVIDIA_NIM_API_KEY")
-            ),
-            ApiIntegrationStatus(
-                id = "supabase",
-                name = "Supabase Backend & Auth",
-                configured = SecretsConfig.hasSupabase,
-                reachable = supabaseClient.currentSignedInEmail() != null,
-                statusText = supabaseClient.currentSignedInEmail()?.let { "Signed in: $it" }
-                    ?: SecretsConfig.supabaseHostLabel?.let { "Configured ($it — Sign in on Accounts tab)" }
-                    ?: "Not Configured",
-                obtainGuide = "Create a Supabase project at supabase.com and add SUPABASE_URL + SUPABASE_ANON_KEY in AI Studio Secrets.",
-                secretKeys = listOf("SUPABASE_URL", "SUPABASE_ANON_KEY")
-            ),
-            ApiIntegrationStatus(
-                id = "deriv",
-                name = "Deriv Broker (OAuth / Token)",
-                configured = SecretsConfig.hasDerivAuth || SecretsConfig.derivAppId != null,
-                reachable = _uiState.value.accounts.any { it.brokerType == BrokerType.DERIV && it.isConnected },
-                statusText = if (_uiState.value.accounts.any { it.brokerType == BrokerType.DERIV && it.isConnected }) "Authorized & Synced"
-                else if (SecretsConfig.hasDerivAuth) "Token Loaded (Syncing)"
-                else if (SecretsConfig.derivAppId != null) "App ID Configured (Tap Deriv OAuth)"
-                else "Public Market Feed Only",
-                obtainGuide = "Register an app at developers.deriv.com (redirect URI: jarvis://deriv-oauth) and add DERIV_APP_ID / DERIV_API_TOKEN in Secrets.",
-                secretKeys = listOf("DERIV_APP_ID", "DERIV_API_TOKEN")
-            ),
-            ApiIntegrationStatus(
-                id = "binance",
-                name = "Binance Spot API",
-                configured = SecretsConfig.hasBinanceAuth,
-                reachable = _uiState.value.accounts.any { it.brokerType == BrokerType.BINANCE && it.isConnected },
-                statusText = if (_uiState.value.accounts.any { it.brokerType == BrokerType.BINANCE && it.isConnected }) "Authorized (Spot/Read)"
-                else if (SecretsConfig.hasBinanceAuth) "Credentials Loaded"
-                else "Public Market Feed Only",
-                obtainGuide = "Create a Read + Spot Trade key (disable Withdrawals) in Binance API Management and add BINANCE_API_KEY + BINANCE_API_SECRET in Secrets.",
-                secretKeys = listOf("BINANCE_API_KEY", "BINANCE_API_SECRET")
-            ),
-            ApiIntegrationStatus(
-                id = "finnhub",
-                name = "Finnhub News & Economic Calendar",
-                configured = SecretsConfig.hasFinnhub,
-                reachable = null,
-                statusText = if (SecretsConfig.hasFinnhub) "Key Loaded (Live News & Calendar Active)" else "Optional (RSS News Active)",
-                obtainGuide = "Obtain a free API key at finnhub.io and add FINNHUB_API_KEY in AI Studio Secrets.",
-                secretKeys = listOf("FINNHUB_API_KEY")
-            ),
-            ApiIntegrationStatus(
-                id = "mt_bridge",
-                name = "MetaTrader 4 / 5 HTTPS Bridge (Optional)",
-                configured = SecretsConfig.hasMtBridge,
-                reachable = _uiState.value.accounts.any { it.brokerType == BrokerType.MT_BRIDGE && it.isConnected },
-                statusText = if (SecretsConfig.hasMtBridge) "Bridge URL Configured" else "Optional — Deferred (Add later)",
-                obtainGuide = "Optional: Deploy an authorized MetaApi or self-hosted HTTPS MT4/MT5 REST bridge and add MT_BRIDGE_URL + MT_BRIDGE_TOKEN in Secrets when ready.",
-                secretKeys = listOf("MT_BRIDGE_URL", "MT_BRIDGE_TOKEN")
+        val state = _uiState.value
+        val derivAcc = state.accounts.firstOrNull { it.brokerType == BrokerType.DERIV }
+        val binanceAcc = state.accounts.firstOrNull { it.brokerType == BrokerType.BINANCE }
+        val mtAcc = state.accounts.firstOrNull { it.brokerType == BrokerType.MT_BRIDGE }
+
+        val statuses = buildList {
+            add(
+                ApiIntegrationStatus(
+                    id = "nvidia_nim",
+                    name = "NVIDIA NIM Intelligence",
+                    configured = SecretsConfig.hasNvidiaNim || SecretsConfig.hasSupabase,
+                    reachable = state.nimReachable,
+                    statusText = if (SecretsConfig.hasNvidiaNim) "API Key Loaded (BuildConfig)" else if (SecretsConfig.hasSupabase) "Proxied via Supabase Edge Function" else "Key Not Configured",
+                    obtainGuide = "Generate a key at build.nvidia.com and configure NVIDIA_NIM_API_KEY in AI Studio Secrets.",
+                    secretKeys = listOf("NVIDIA_NIM_API_KEY")
+                )
             )
-        )
+            add(
+                ApiIntegrationStatus(
+                    id = "supabase",
+                    name = "Supabase Backend & Auth",
+                    configured = SecretsConfig.hasSupabase,
+                    reachable = if (supabaseClient.currentSignedInEmail() != null) true else state.supabaseReachable,
+                    statusText = supabaseClient.currentSignedInEmail()?.let { "Signed in: $it" }
+                        ?: state.supabaseHealthDetail
+                        ?: SecretsConfig.supabaseHostLabel?.let { "Configured ($it)" }
+                        ?: "Not Configured",
+                    obtainGuide = "Create a Supabase project at supabase.com and add SUPABASE_URL + SUPABASE_ANON_KEY in AI Studio Secrets.",
+                    secretKeys = listOf("SUPABASE_URL", "SUPABASE_ANON_KEY")
+                )
+            )
+            add(
+                ApiIntegrationStatus(
+                    id = "deriv",
+                    name = "Deriv Broker (OAuth / Token)",
+                    configured = SecretsConfig.hasDerivAuth || SecretsConfig.derivAppId != null,
+                    reachable = derivAcc?.isConnected,
+                    statusText = when {
+                        derivAcc?.isConnected == true -> "Connected (${derivAcc.accountCode} • ${derivAcc.currency} ${"%.2f".format(derivAcc.balance ?: 0.0)})"
+                        derivAcc != null && (SecretsConfig.hasDerivAuth || SecretsConfig.derivAppId != null) -> derivAcc.statusMessage
+                        SecretsConfig.hasDerivAuth -> "Token Loaded (Syncing)"
+                        SecretsConfig.derivAppId != null -> "App ID Configured (Tap Deriv OAuth)"
+                        else -> "Public Market Feed Only"
+                    },
+                    obtainGuide = "Register an app at developers.deriv.com (redirect URI: jarvis://deriv-oauth) and add DERIV_APP_ID / DERIV_API_TOKEN in Secrets.",
+                    secretKeys = listOf("DERIV_APP_ID", "DERIV_API_TOKEN")
+                )
+            )
+            add(
+                ApiIntegrationStatus(
+                    id = "binance",
+                    name = "Binance Spot API",
+                    configured = SecretsConfig.hasBinanceAuth,
+                    reachable = binanceAcc?.isConnected,
+                    statusText = when {
+                        binanceAcc?.isConnected == true -> "Connected (${binanceAcc.accountCode} • ${binanceAcc.currency} ${"%.2f".format(binanceAcc.balance ?: 0.0)})"
+                        binanceAcc != null && SecretsConfig.hasBinanceAuth -> binanceAcc.statusMessage
+                        SecretsConfig.hasBinanceAuth -> "Credentials Loaded"
+                        else -> "Public Market Feed Only"
+                    },
+                    obtainGuide = "Create a Read + Spot Trade key (disable Withdrawals) in Binance API Management and add BINANCE_API_KEY + BINANCE_API_SECRET in Secrets.",
+                    secretKeys = listOf("BINANCE_API_KEY", "BINANCE_API_SECRET")
+                )
+            )
+            add(
+                ApiIntegrationStatus(
+                    id = "finnhub",
+                    name = "Finnhub News & Market API",
+                    configured = SecretsConfig.hasFinnhub,
+                    reachable = state.finnhubReachable,
+                    statusText = state.finnhubHealthDetail
+                        ?: if (SecretsConfig.hasFinnhub) "Key Loaded (Verifying Live Feed)" else "Optional (RSS News Active)",
+                    obtainGuide = "Obtain a free API key at finnhub.io and add FINNHUB_API_KEY in AI Studio Secrets.",
+                    secretKeys = listOf("FINNHUB_API_KEY")
+                )
+            )
+            if (SecretsConfig.hasMtBridge) {
+                add(
+                    ApiIntegrationStatus(
+                        id = "mt_bridge",
+                        name = "MetaTrader 4 / 5 HTTPS Bridge",
+                        configured = true,
+                        reachable = mtAcc?.isConnected,
+                        statusText = mtAcc?.statusMessage ?: "Bridge URL Configured",
+                        obtainGuide = "Connected via MT_BRIDGE_URL + MT_BRIDGE_TOKEN in AI Studio Secrets.",
+                        secretKeys = listOf("MT_BRIDGE_URL", "MT_BRIDGE_TOKEN")
+                    )
+                )
+            }
+        }
         _uiState.update { it.copy(apiStatuses = statuses) }
     }
 
