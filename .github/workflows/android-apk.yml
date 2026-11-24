@@ -42,7 +42,7 @@ jobs:
       - name: Install Android SDK platform and build tools
         run: |
           sdkmanager --install \
-            "platforms;android-36" \
+            "platforms;android-36.1" \
             "build-tools;36.0.0" \
             "platform-tools"
 
@@ -54,7 +54,7 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Create deterministic debug signing key
+      - name: Create debug signing key
         run: |
           keytool -genkeypair -v \
             -keystore debug.keystore \
