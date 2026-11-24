@@ -90,18 +90,18 @@ jobs:
           retention-days: 14
 
       - name: Prepare permanent release signing key
-        if: env.KEYSTORE_BASE64 != ''
+        if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != ''
         run: |
           echo "$KEYSTORE_BASE64" | base64 --decode > my-upload-key.jks
           test -s my-upload-key.jks
           echo "KEYSTORE_PATH=$GITHUB_WORKSPACE/my-upload-key.jks" >> "$GITHUB_ENV"
 
       - name: Build signed release APK
-        if: env.KEYSTORE_BASE64 != ''
+        if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != ''
         run: gradle --no-daemon --stacktrace :app:assembleRelease
 
       - name: Stage release APK
-        if: env.KEYSTORE_BASE64 != ''
+        if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != ''
         run: |
           mkdir -p release-assets
           cp app/build/outputs/apk/release/*.apk release-assets/Jarvis.apk
@@ -109,7 +109,7 @@ jobs:
           ls -lh release-assets/Jarvis.apk
 
       - name: Publish GitHub Release
-        if: env.KEYSTORE_BASE64 != '' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != '' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.VERSION_NAME }}
@@ -125,6 +125,6 @@ jobs:
           make_latest: true
 
       - name: Explain why signed release was skipped
-        if: env.KEYSTORE_BASE64 == ''
+        if: env.KEYSTORE_BASE64 == '' || env.STORE_PASSWORD == '' || env.KEY_PASSWORD == ''
         run: |
-          echo "::notice::Debug APK built. Signed release publishing is waiting for KEYSTORE_BASE64, STORE_PASSWORD and KEY_PASSWORD repository secrets."
+          echo "::notice::Debug APK built. Signed release build skipped: confirm KEYSTORE_BASE64, STORE_PASSWORD and KEY_PASSWORD are all configured."
