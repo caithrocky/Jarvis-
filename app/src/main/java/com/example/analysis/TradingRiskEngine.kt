@@ -19,27 +19,57 @@ object TradingRiskEngine {
         takeProfit: Double?,
         openPositionsCount: Int,
         explicitUserApproval: Boolean
+    ): RiskValidationResult = validateOrder(
+        activeModes = setOf(mode),
+        riskLimits = riskLimits,
+        symbol = symbol,
+        amountUsd = amountUsd,
+        stopLoss = stopLoss,
+        takeProfit = takeProfit,
+        openPositionsCount = openPositionsCount,
+        explicitUserApproval = explicitUserApproval
+    )
+
+    fun validateOrder(
+        activeModes: Set<TradingOperatingMode>,
+        riskLimits: RiskLimits,
+        symbol: String,
+        amountUsd: Double,
+        stopLoss: Double?,
+        takeProfit: Double?,
+        openPositionsCount: Int,
+        explicitUserApproval: Boolean
     ): RiskValidationResult {
         if (riskLimits.emergencyStopActive) {
             return RiskValidationResult.Blocked("Emergency Stop is active. All order execution is halted.")
         }
 
-        if (mode == TradingOperatingMode.OBSERVATION) {
-            return RiskValidationResult.Blocked("Observation Mode active: switch to Assistant or Automated Mode to execute trades.")
+        if (activeModes.isEmpty()) {
+            return RiskValidationResult.Blocked("No operating mode is active. Enable Assistant or Automated Mode to execute trades.")
         }
 
-        if (mode == TradingOperatingMode.ASSISTANT && !explicitUserApproval) {
-            return RiskValidationResult.Blocked("Assistant Mode requires explicit user confirmation before executing.")
+        val hasAutomated = TradingOperatingMode.AUTOMATED in activeModes
+        val hasAssistant = TradingOperatingMode.ASSISTANT in activeModes
+
+        if (!hasAssistant && !hasAutomated) {
+            return RiskValidationResult.Blocked("Observation Mode active: enable Assistant or Automated Mode to execute trades.")
         }
 
-        if (mode == TradingOperatingMode.AUTOMATED && !riskLimits.automatedTradingAuthorized) {
+        if (!explicitUserApproval) {
+            if (!hasAutomated) {
+                return RiskValidationResult.Blocked("Assistant Mode requires explicit user confirmation before executing.")
+            }
+            if (!riskLimits.automatedTradingAuthorized) {
+                return RiskValidationResult.Blocked("Automated Trading is disabled by default and must be explicitly authorized.")
+            }
+        } else if (!hasAssistant && !riskLimits.automatedTradingAuthorized) {
             return RiskValidationResult.Blocked("Automated Trading is disabled by default and must be explicitly authorized.")
         }
 
         if (riskLimits.currentDailyLossUsd >= riskLimits.maxDailyLossUsd) {
             return RiskValidationResult.Blocked(
                 reason = "Daily loss limit reached ($${"%.2f".format(riskLimits.currentDailyLossUsd)} / $${"%.2f".format(riskLimits.maxDailyLossUsd)}). Automated trading suspended.",
-                triggerAutoSuspend = mode == TradingOperatingMode.AUTOMATED
+                triggerAutoSuspend = hasAutomated
             )
         }
 

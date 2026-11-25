@@ -4,16 +4,20 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import org.json.JSONArray
+import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.security.KeyStore
+import java.util.Locale
+import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Stores runtime-obtained session tokens (e.g., Deriv OAuth tokens from redirect,
- * Supabase access token) encrypted at rest using an Android Keystore AES-256-GCM key.
+ * Stores personal identity details, saved website/app login credentials, and runtime API overrides
+ * encrypted at rest using an Android Keystore AES-256-GCM key.
  */
 class SecureCredentialStore(context: Context) {
 
@@ -83,6 +87,171 @@ class SecureCredentialStore(context: Context) {
         prefs.edit().clear().apply()
     }
 
+    fun getSignupProfile(): SignupProfile {
+        return SignupProfile(
+            fullName = getDecrypted(KEY_SIGNUP_FULL_NAME).orEmpty(),
+            username = getDecrypted(KEY_SIGNUP_USERNAME).orEmpty(),
+            email = getDecrypted(KEY_SIGNUP_EMAIL).orEmpty(),
+            phoneNumber = getDecrypted(KEY_SIGNUP_PHONE).orEmpty(),
+            dateOfBirth = getDecrypted(KEY_SIGNUP_DOB).orEmpty(),
+            country = getDecrypted(KEY_SIGNUP_COUNTRY).orEmpty(),
+            addressLine = getDecrypted(KEY_SIGNUP_ADDRESS).orEmpty(),
+            city = getDecrypted(KEY_SIGNUP_CITY).orEmpty(),
+            postalCode = getDecrypted(KEY_SIGNUP_POSTAL).orEmpty(),
+            defaultPassword = getDecrypted(KEY_SIGNUP_DEFAULT_PASSWORD).orEmpty(),
+            allowAssistedFill = getDecrypted(KEY_SIGNUP_ALLOW_AUTOFILL) == "true"
+        )
+    }
+
+    fun saveSignupProfile(profile: SignupProfile) {
+        putEncrypted(KEY_SIGNUP_FULL_NAME, profile.fullName.trim())
+        putEncrypted(KEY_SIGNUP_USERNAME, profile.username.trim())
+        putEncrypted(KEY_SIGNUP_EMAIL, profile.email.trim())
+        putEncrypted(KEY_SIGNUP_PHONE, profile.phoneNumber.trim())
+        putEncrypted(KEY_SIGNUP_DOB, profile.dateOfBirth.trim())
+        putEncrypted(KEY_SIGNUP_COUNTRY, profile.country.trim())
+        putEncrypted(KEY_SIGNUP_ADDRESS, profile.addressLine.trim())
+        putEncrypted(KEY_SIGNUP_CITY, profile.city.trim())
+        putEncrypted(KEY_SIGNUP_POSTAL, profile.postalCode.trim())
+        putEncrypted(KEY_SIGNUP_DEFAULT_PASSWORD, profile.defaultPassword)
+        putEncrypted(KEY_SIGNUP_ALLOW_AUTOFILL, if (profile.allowAssistedFill) "true" else "false")
+    }
+
+    fun getSavedCredentials(): List<SavedCredentialEntry> {
+        val rawJson = getDecrypted(KEY_SAVED_CREDENTIALS_JSON) ?: return emptyList()
+        return runCatching {
+            val arr = JSONArray(rawJson)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val id = obj.optString("id").ifBlank { UUID.randomUUID().toString() }
+                    val service = obj.optString("serviceName").trim()
+                    if (service.isBlank()) continue
+                    add(
+                        SavedCredentialEntry(
+                            id = id,
+                            serviceName = service,
+                            websiteOrApp = obj.optString("websiteOrApp").trim(),
+                            usernameOrEmail = obj.optString("usernameOrEmail").trim(),
+                            password = obj.optString("password"),
+                            notes = obj.optString("notes").trim()
+                        )
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun upsertSavedCredential(entry: SavedCredentialEntry): List<SavedCredentialEntry> {
+        val current = getSavedCredentials().toMutableList()
+        val idx = current.indexOfFirst { it.id == entry.id }
+        val normalized = entry.copy(
+            id = entry.id.ifBlank { UUID.randomUUID().toString() },
+            serviceName = entry.serviceName.trim(),
+            websiteOrApp = entry.websiteOrApp.trim(),
+            usernameOrEmail = entry.usernameOrEmail.trim(),
+            notes = entry.notes.trim()
+        )
+        if (idx >= 0) {
+            current[idx] = normalized
+        } else {
+            current.add(0, normalized)
+        }
+        persistSavedCredentials(current)
+        return current
+    }
+
+    fun deleteSavedCredential(id: String): List<SavedCredentialEntry> {
+        val updated = getSavedCredentials().filterNot { it.id == id }
+        persistSavedCredentials(updated)
+        return updated
+    }
+
+    fun findCredentialForTarget(targetOrPackage: String, screenContext: String = ""): SavedCredentialEntry? {
+        val entries = getSavedCredentials()
+        if (entries.isEmpty()) return null
+        val q = targetOrPackage.trim().lowercase(Locale.US)
+        val screenLower = screenContext.lowercase(Locale.US)
+
+        if (q.isNotBlank() && q != "autofill") {
+            entries.firstOrNull {
+                it.serviceName.lowercase(Locale.US) == q ||
+                    it.websiteOrApp.lowercase(Locale.US).contains(q) ||
+                    q.contains(it.serviceName.lowercase(Locale.US))
+            }?.let { return it }
+        }
+
+        if (screenLower.isNotBlank()) {
+            entries.firstOrNull { entry ->
+                val s = entry.serviceName.lowercase(Locale.US)
+                val w = entry.websiteOrApp.lowercase(Locale.US)
+                    .removePrefix("https://").removePrefix("http://").removePrefix("www.").substringBefore("/")
+                (s.length >= 2 && screenLower.contains(s)) || (w.length >= 3 && screenLower.contains(w))
+            }?.let { return it }
+        }
+        return null
+    }
+
+    private fun persistSavedCredentials(entries: List<SavedCredentialEntry>) {
+        val arr = JSONArray()
+        entries.forEach { e ->
+            arr.put(
+                JSONObject().apply {
+                    put("id", e.id)
+                    put("serviceName", e.serviceName)
+                    put("websiteOrApp", e.websiteOrApp)
+                    put("usernameOrEmail", e.usernameOrEmail)
+                    put("password", e.password)
+                    put("notes", e.notes)
+                }
+            )
+        }
+        putEncrypted(KEY_SAVED_CREDENTIALS_JSON, arr.toString())
+    }
+
+    fun generateStrongPassword(length: Int = 16): String {
+        val upper = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+        val lower = "abcdefghijkmnopqrstuvwxyz"
+        val digits = "23456789"
+        val symbols = "!@#$%&*_-+"
+        val all = upper + lower + digits + symbols
+        val rng = java.security.SecureRandom()
+        val chars = mutableListOf(
+            upper[rng.nextInt(upper.length)],
+            lower[rng.nextInt(lower.length)],
+            digits[rng.nextInt(digits.length)],
+            symbols[rng.nextInt(symbols.length)]
+        )
+        while (chars.size < length.coerceAtLeast(12)) {
+            chars.add(all[rng.nextInt(all.length)])
+        }
+        chars.shuffle(rng)
+        return chars.joinToString("")
+    }
+
+    data class SignupProfile(
+        val fullName: String = "",
+        val username: String = "",
+        val email: String = "",
+        val phoneNumber: String = "",
+        val dateOfBirth: String = "",
+        val country: String = "",
+        val addressLine: String = "",
+        val city: String = "",
+        val postalCode: String = "",
+        val defaultPassword: String = "",
+        val allowAssistedFill: Boolean = false
+    )
+
+    data class SavedCredentialEntry(
+        val id: String = UUID.randomUUID().toString(),
+        val serviceName: String,
+        val websiteOrApp: String = "",
+        val usernameOrEmail: String,
+        val password: String,
+        val notes: String = ""
+    )
+
     companion object {
         private const val PREFS_NAME = "jarvis_keystore_vault"
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
@@ -94,5 +263,19 @@ class SecureCredentialStore(context: Context) {
         const val KEY_DERIV_OAUTH_CURRENCY = "deriv_oauth_currency"
         const val KEY_SUPABASE_ACCESS_TOKEN = "supabase_access_token"
         const val KEY_SUPABASE_USER_EMAIL = "supabase_user_email"
+
+        const val KEY_SIGNUP_FULL_NAME = "signup_full_name"
+        const val KEY_SIGNUP_USERNAME = "signup_username"
+        const val KEY_SIGNUP_EMAIL = "signup_email"
+        const val KEY_SIGNUP_PHONE = "signup_phone"
+        const val KEY_SIGNUP_DOB = "signup_dob"
+        const val KEY_SIGNUP_COUNTRY = "signup_country"
+        const val KEY_SIGNUP_ADDRESS = "signup_address"
+        const val KEY_SIGNUP_CITY = "signup_city"
+        const val KEY_SIGNUP_POSTAL = "signup_postal"
+        const val KEY_SIGNUP_DEFAULT_PASSWORD = "signup_default_password"
+        const val KEY_SIGNUP_ALLOW_AUTOFILL = "signup_allow_autofill"
+        const val KEY_SAVED_CREDENTIALS_JSON = "saved_credentials_json"
+        const val KEY_NVIDIA_NIM_API_OVERRIDE = "nvidia_nim_api_override"
     }
 }

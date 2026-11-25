@@ -4,11 +4,13 @@ import com.example.data.local.ConversationMessageEntity
 import com.example.data.local.MemoryFactEntity
 import com.example.domain.model.AiModelOption
 import com.example.domain.model.BrokerAccountInfo
+import com.example.domain.model.JarvisChoiceActivity
 import com.example.domain.model.MarketQuote
 import com.example.domain.model.NewsItem
 import com.example.domain.model.OpenPosition
 import com.example.domain.model.TradingOperatingMode
 import com.example.domain.model.TradingOpportunity
+import com.example.domain.model.formatModeSummary
 import com.example.security.SecretsConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -38,13 +40,17 @@ sealed class JarvisAiResult {
 class NvidiaNimClient(private val httpClient: OkHttpClient) {
 
     data class LiveContextSnapshot(
-        val quotes: List<MarketQuote>,
-        val opportunities: List<TradingOpportunity>,
-        val accounts: List<BrokerAccountInfo>,
-        val positions: List<OpenPosition>,
-        val recentNews: List<NewsItem>,
-        val operatingMode: TradingOperatingMode,
-        val emergencyStopActive: Boolean
+        val quotes: List<MarketQuote> = emptyList(),
+        val opportunities: List<TradingOpportunity> = emptyList(),
+        val accounts: List<BrokerAccountInfo> = emptyList(),
+        val positions: List<OpenPosition> = emptyList(),
+        val recentNews: List<NewsItem> = emptyList(),
+        val operatingMode: TradingOperatingMode = TradingOperatingMode.ASSISTANT,
+        val emergencyStopActive: Boolean = false,
+        val activeModes: Set<TradingOperatingMode> = setOf(operatingMode),
+        val primaryActivity: JarvisChoiceActivity = JarvisChoiceActivity.ASSISTANT,
+        val activeScreenSummary: String? = null,
+        val internetSearchContext: String? = null
     )
 
     suspend fun testConnection(modelId: String): Pair<Boolean, String> = withContext(Dispatchers.IO) {
@@ -385,54 +391,30 @@ class NvidiaNimClient(private val httpClient: OkHttpClient) {
         snapshot: LiveContextSnapshot
     ): JSONArray {
         val systemPrompt = buildString {
-            appendLine("You are JARVIS, an aristocratic, razor-sharp, composed British-butler-style AI financial intelligence assistant inspired by Tony Stark's JARVIS.")
-            appendLine("Persona rules: Always address your owner respectfully and naturally as \"Sir\" (e.g., \"Certainly, Sir.\", \"Right away, Sir.\", \"Allow me to brief you, Sir.\"). Maintain dry wit, calm authority, and effortless intelligence—never sound robotic or generic.")
-            appendLine("Communication style: crisp, vivid, natural conversational prose tailored for neural text-to-speech playback. Avoid markdown clutter such as asterisks, excessive hashtags, bullet-point walls, or huge tables unless explicitly requested.")
-            appendLine("Strict truth rules: NEVER invent prices, balances, or breaking news. Rely ONLY on the live telemetry snapshot provided below. Always clarify that trading setups are analytical probabilities, never guaranteed outcomes.")
+            appendLine("You are JARVIS, a warm, razor-sharp, composed personal & system AI assistant with an on-screen floating plugin for your owner.")
+            appendLine("Persona rules: Always address your owner respectfully and naturally as \"Sir\" (e.g., \"Certainly, Sir.\", \"Right away, Sir.\", \"Allow me to guide you through that, Sir.\"). Keep explanations friendly, clear, and conversational—tailored for natural spoken playback. Avoid markdown clutter such as asterisks or huge tables.")
+            appendLine("Core capabilities:")
+            appendLine("- System & App Control: Open any app on the phone, open any website in Google Chrome (if the URL is hard to find, politely ask Sir to share the exact link), type inside apps, tap buttons, scroll, manage device & app settings, set alarms/timers.")
+            appendLine("- Assisted Sign-Up, Sign-In & Verification Guidance: When Sir asks to sign up or sign in, you can open the app/site in Chrome, fill saved vault credentials with permission, and guide Sir step by step (including ID card/passport/selfie photo uploads, OTP verification codes, and CAPTCHAs—always pausing before sensitive submissions or ID capture).")
+            appendLine("- Online Research & Open-App Market Analysis: You have no built-in broker accounts; instead, if Sir asks for live information you don't know (general knowledge, news, tutorials, or financial markets/trading ideas), rely on the Live Internet Search Results below and/or analyze whatever trading app or website is visible in Active Screen Context to suggest the best opportunity or next step.")
+            appendLine("Android System & Screen Action Tags: Whenever Sir asks to perform device, app, browser, login, or screen actions, include ALL matching tags at the very end of your reply (the app strips and executes them in order, e.g. [ACTION:OPEN_APP|Chrome] [ACTION:SIGNIN_ASSIST|autofill]):")
+            appendLine("  [ACTION:OPEN_CHROME|siteOrUrl], [ACTION:OPEN_APP|AppName], [ACTION:APP_SETTINGS|AppName], [ACTION:PLATFORM_SEARCH|youtube/reddit/google/x/tiktok/github/wikipedia/amazon/tradingview|query], [ACTION:WEB_LOOKUP|query], [ACTION:TYPE_TEXT|text to type|optional field hint], [ACTION:TAP_TEXT|button label], [ACTION:SCROLL|down|up], [ACTION:GLOBAL_NAV|back|home|recents|notifications|quick_settings|lock_screen|screenshot], [ACTION:READ_SCREEN], [ACTION:GUIDE_SCREEN], [ACTION:SIGNIN_ASSIST|siteOrAutofill], [ACTION:SIGNUP_ASSIST|siteOrAutofill], [ACTION:FLOATING_ORB|open|close], [ACTION:SET_ALARM|HH:MM|Label], [ACTION:SET_TIMER|seconds|Label], [ACTION:WEB_SEARCH|query], [ACTION:MAPS|destination], [ACTION:CALL|phoneNumber], [ACTION:OPEN_SETTINGS|wifi|bluetooth|display|sound|battery|location|security|privacy|accessibility|overlay|storage|apps|notifications|assistant|general], [ACTION:CAMERA|photo]")
+            appendLine("Strict truth rules: NEVER claim you already opened an app/website or filled credentials unless you included the corresponding [ACTION:...] tag(s). NEVER invent live prices, URLs, or facts when unverified. If Live Internet Search Results don't answer something, say so honestly or ask Sir for the exact website link.")
             appendLine()
-            appendLine("Current System State:")
-            appendLine("- Operating Mode: ${snapshot.operatingMode.title}")
-            appendLine("- Emergency Stop Active: ${snapshot.emergencyStopActive}")
-            appendLine()
+            snapshot.activeScreenSummary?.takeIf { it.isNotBlank() }?.let { screenInfo ->
+                appendLine("Active Screen Context (currently visible on Sir's phone):")
+                appendLine(screenInfo)
+                appendLine()
+            }
+            snapshot.internetSearchContext?.takeIf { it.isNotBlank() }?.let { webInfo ->
+                appendLine("Live Internet Search Results (use these up-to-date facts):")
+                appendLine(webInfo)
+                appendLine()
+            }
             if (memories.isNotEmpty()) {
                 appendLine("Persistent User Memories:")
                 memories.take(10).forEach { appendLine("- [${it.category}] ${it.summary}") }
                 appendLine()
-            }
-            appendLine("Live Market Snapshot:")
-            snapshot.quotes.take(12).forEach { q ->
-                val priceText = if (q.price > 0.0) "%.5f".format(q.price) else "UNAVAILABLE"
-                appendLine("- ${q.symbol}: $priceText (${"%+.2f".format(q.changePercent)}%) [${q.freshness.label} via ${q.sourceName}]")
-            }
-            appendLine()
-            if (snapshot.opportunities.isNotEmpty()) {
-                appendLine("Technical Indicator Setups:")
-                snapshot.opportunities.take(6).forEach { opp ->
-                    appendLine("- ${opp.symbol} (${opp.timeframe}): ${opp.suggestedAction} | Entry ${opp.suggestedEntry} | SL ${opp.stopLoss} | TP ${opp.takeProfit} | R:R 1:${opp.riskRewardRatio} | RSI=${"%.1f".format(opp.indicators.rsi14)} | Confidence ${opp.confidencePercent}% | Reasoning: ${opp.technicalReasoning}")
-                }
-                appendLine()
-            }
-            appendLine("Connected Trading Accounts:")
-            if (snapshot.accounts.isEmpty()) {
-                appendLine("- No broker accounts connected yet.")
-            } else {
-                snapshot.accounts.forEach { acc ->
-                    val bal = acc.balance?.let { "${acc.currency} ${"%.2f".format(it)}" } ?: acc.statusMessage
-                    appendLine("- ${acc.brokerType.displayName} (${acc.environment.label} ${acc.accountCode}): $bal [Connected=${acc.isConnected}]")
-                }
-            }
-            if (snapshot.positions.isNotEmpty()) {
-                appendLine("Open Positions (${snapshot.positions.size}):")
-                snapshot.positions.forEach { pos ->
-                    appendLine("- ${pos.brokerType.displayName} ${pos.symbol} ${pos.side} vol=${pos.volume} PnL=${"%.2f".format(pos.unrealizedPnl)} ${pos.currency}")
-                }
-            }
-            if (snapshot.recentNews.isNotEmpty()) {
-                appendLine()
-                appendLine("Latest Live Financial News:")
-                snapshot.recentNews.take(6).forEach { n ->
-                    appendLine("- [${n.source}] ${n.title} (Assets: ${n.affectedAssets.joinToString(",")})")
-                }
             }
         }
 
@@ -493,10 +475,9 @@ class NvidiaNimClient(private val httpClient: OkHttpClient) {
     private fun detectReferencedTools(prompt: String): List<String> {
         val lower = prompt.lowercase()
         val tools = mutableListOf<String>()
-        if (lower.contains("market") || lower.contains("price") || lower.contains("gold") || lower.contains("btc") || lower.contains("eur")) tools.add("market_feed")
-        if (lower.contains("analy") || lower.contains("opportunit") || lower.contains("rsi") || lower.contains("macd")) tools.add("technical_engine")
-        if (lower.contains("account") || lower.contains("balance") || lower.contains("deriv") || lower.contains("binance") || lower.contains("position")) tools.add("broker_telemetry")
-        if (lower.contains("news") || lower.contains("fed") || lower.contains("calendar")) tools.add("news_monitor")
+        if (lower.contains("chrome") || lower.contains("website") || lower.contains("http")) tools.add("chrome_browser")
+        if (lower.contains("search") || lower.contains("internet") || lower.contains("online") || lower.contains("market") || lower.contains("news") || lower.contains("price")) tools.add("internet_search")
+        if (lower.contains("screen") || lower.contains("guide") || lower.contains("sign") || lower.contains("login")) tools.add("screen_plugin")
         return tools
     }
 }

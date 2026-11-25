@@ -5,4 +5,7 @@
     <string name="market_alerts_channel_name">JARVIS Market Alerts</string>
     <string name="market_alerts_channel_desc">Price breakouts, economic events, and trade execution alerts</string>
     <string name="orb_content_description">JARVIS AI core visualization orb</string>
+    <string name="accessibility_service_description">Lets JARVIS read visible screen elements, write text inside apps, help fill account signup forms with your permission, and navigate Android screens when you ask.</string>
+    <string name="floating_orb_channel_name">JARVIS Floating Orb</string>
+    <string name="floating_orb_channel_desc">Controls for the translucent floating JARVIS mini-orb overlay</string>
 </resources>

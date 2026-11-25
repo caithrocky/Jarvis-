@@ -12,6 +12,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.domain.model.AiModelOption
+import com.example.domain.model.JarvisChoiceActivity
 import com.example.domain.model.RiskLimits
 import com.example.domain.model.TradingOperatingMode
 import com.example.domain.model.VoicePersonality
@@ -28,7 +29,11 @@ data class JarvisUserSettings(
     val voiceOutputEnabled: Boolean = true,
     val useNvidiaMagpieVoice: Boolean = true,
     val memoryEnabled: Boolean = true,
-    val operatingMode: TradingOperatingMode = TradingOperatingMode.OBSERVATION,
+    val activeOperatingModes: Set<TradingOperatingMode> = setOf(
+        TradingOperatingMode.OBSERVATION,
+        TradingOperatingMode.ASSISTANT
+    ),
+    val primaryActivity: JarvisChoiceActivity = JarvisChoiceActivity.ASSISTANT,
     val riskLimits: RiskLimits = RiskLimits(),
     val watchlistSymbols: Set<String> = setOf("EUR/USD", "GBP/USD", "XAU/USD", "BTC/USDT", "ETH/USDT", "SOL/USDT"),
     val notifyMarketMoves: Boolean = true,
@@ -37,8 +42,16 @@ data class JarvisUserSettings(
     val notifyTrades: Boolean = true,
     val highContrastHud: Boolean = false,
     val supabaseAutoSync: Boolean = false,
-    val preferredBroker: String = "DERIV"
-)
+    val preferredBroker: String = "DERIV",
+    val floatingOrbEnabled: Boolean = true
+) {
+    val operatingMode: TradingOperatingMode
+        get() = when {
+            TradingOperatingMode.AUTOMATED in activeOperatingModes -> TradingOperatingMode.AUTOMATED
+            TradingOperatingMode.ASSISTANT in activeOperatingModes -> TradingOperatingMode.ASSISTANT
+            else -> TradingOperatingMode.OBSERVATION
+        }
+}
 
 class JarvisPreferencesRepository(private val context: Context) {
 
@@ -51,6 +64,8 @@ class JarvisPreferencesRepository(private val context: Context) {
         val USE_NVIDIA_MAGPIE_VOICE = booleanPreferencesKey("use_nvidia_magpie_voice")
         val MEMORY_ENABLED = booleanPreferencesKey("memory_enabled")
         val OPERATING_MODE = stringPreferencesKey("operating_mode")
+        val ACTIVE_OPERATING_MODES = stringSetPreferencesKey("active_operating_modes")
+        val PRIMARY_ACTIVITY = stringPreferencesKey("primary_activity")
         val AUTO_AUTHORIZED = booleanPreferencesKey("auto_trading_authorized")
         val EMERGENCY_STOP = booleanPreferencesKey("emergency_stop_active")
         val MAX_TRADE_USD = doublePreferencesKey("max_trade_amount_usd")
@@ -70,12 +85,32 @@ class JarvisPreferencesRepository(private val context: Context) {
         val HIGH_CONTRAST_HUD = booleanPreferencesKey("high_contrast_hud")
         val SUPABASE_AUTO_SYNC = booleanPreferencesKey("supabase_auto_sync")
         val PREFERRED_BROKER = stringPreferencesKey("preferred_broker")
+        val FLOATING_ORB_ENABLED = booleanPreferencesKey("floating_orb_enabled")
     }
 
     val settingsFlow: Flow<JarvisUserSettings> = context.jarvisDataStore.data.map { prefs ->
-        val mode = prefs[Keys.OPERATING_MODE]?.let { name ->
-            TradingOperatingMode.entries.find { it.name == name }
-        } ?: TradingOperatingMode.OBSERVATION
+        val autoAuthorized = prefs[Keys.AUTO_AUTHORIZED] ?: false
+        val emergencyStopped = prefs[Keys.EMERGENCY_STOP] ?: false
+
+        val parsedModes = prefs[Keys.ACTIVE_OPERATING_MODES]
+            ?.mapNotNull { name -> TradingOperatingMode.entries.find { it.name == name } }
+            ?.toSet()
+            ?.takeIf { it.isNotEmpty() }
+            ?: prefs[Keys.OPERATING_MODE]
+                ?.let { name -> TradingOperatingMode.entries.find { it.name == name } }
+                ?.let { setOf(it) }
+            ?: setOf(TradingOperatingMode.OBSERVATION, TradingOperatingMode.ASSISTANT)
+
+        val effectiveModes = parsedModes
+            .filterNot {
+                it == TradingOperatingMode.AUTOMATED && (!autoAuthorized || emergencyStopped)
+            }
+            .toSet()
+            .ifEmpty { setOf(TradingOperatingMode.OBSERVATION) }
+
+        val primaryActivity = prefs[Keys.PRIMARY_ACTIVITY]?.let { name ->
+            JarvisChoiceActivity.entries.find { it.name == name }
+        } ?: JarvisChoiceActivity.ASSISTANT
 
         val personality = prefs[Keys.VOICE_PERSONALITY]?.let { name ->
             VoicePersonality.entries.find { it.name == name }
@@ -90,10 +125,11 @@ class JarvisPreferencesRepository(private val context: Context) {
             voiceOutputEnabled = prefs[Keys.VOICE_OUTPUT_ENABLED] ?: true,
             useNvidiaMagpieVoice = prefs[Keys.USE_NVIDIA_MAGPIE_VOICE] ?: true,
             memoryEnabled = prefs[Keys.MEMORY_ENABLED] ?: true,
-            operatingMode = mode,
+            activeOperatingModes = effectiveModes,
+            primaryActivity = primaryActivity,
             riskLimits = RiskLimits(
-                automatedTradingAuthorized = prefs[Keys.AUTO_AUTHORIZED] ?: false,
-                emergencyStopActive = prefs[Keys.EMERGENCY_STOP] ?: false,
+                automatedTradingAuthorized = autoAuthorized,
+                emergencyStopActive = emergencyStopped,
                 maxTradeAmountUsd = prefs[Keys.MAX_TRADE_USD] ?: defaultRisk.maxTradeAmountUsd,
                 maxDailyLossUsd = prefs[Keys.MAX_DAILY_LOSS_USD] ?: defaultRisk.maxDailyLossUsd,
                 currentDailyLossUsd = prefs[Keys.CURRENT_DAILY_LOSS_USD] ?: 0.0,
@@ -111,7 +147,8 @@ class JarvisPreferencesRepository(private val context: Context) {
             notifyTrades = prefs[Keys.NOTIFY_TRADES] ?: true,
             highContrastHud = prefs[Keys.HIGH_CONTRAST_HUD] ?: false,
             supabaseAutoSync = prefs[Keys.SUPABASE_AUTO_SYNC] ?: false,
-            preferredBroker = prefs[Keys.PREFERRED_BROKER] ?: "DERIV"
+            preferredBroker = prefs[Keys.PREFERRED_BROKER] ?: "DERIV",
+            floatingOrbEnabled = prefs[Keys.FLOATING_ORB_ENABLED] ?: true
         )
     }
 
@@ -146,31 +183,103 @@ class JarvisPreferencesRepository(private val context: Context) {
         context.jarvisDataStore.edit { it[Keys.MEMORY_ENABLED] = enabled }
     }
 
+    suspend fun setPrimaryActivity(activity: JarvisChoiceActivity) {
+        context.jarvisDataStore.edit { it[Keys.PRIMARY_ACTIVITY] = activity.name }
+    }
+
     suspend fun setOperatingMode(mode: TradingOperatingMode) {
-        context.jarvisDataStore.edit {
-            it[Keys.OPERATING_MODE] = mode.name
-            if (mode == TradingOperatingMode.AUTOMATED && it[Keys.AUTO_AUTHORIZED] != true) {
-                // Automated trading remains disabled until explicitly authorized
-                it[Keys.OPERATING_MODE] = TradingOperatingMode.ASSISTANT.name
+        context.jarvisDataStore.edit { prefs ->
+            val resolved = if (mode == TradingOperatingMode.AUTOMATED && prefs[Keys.AUTO_AUTHORIZED] != true) {
+                TradingOperatingMode.ASSISTANT
+            } else {
+                mode
+            }
+            prefs[Keys.OPERATING_MODE] = resolved.name
+            prefs[Keys.ACTIVE_OPERATING_MODES] = setOf(resolved.name)
+        }
+    }
+
+    suspend fun toggleOperatingMode(mode: TradingOperatingMode) {
+        context.jarvisDataStore.edit { prefs ->
+            val current = prefs[Keys.ACTIVE_OPERATING_MODES]
+                ?.mapNotNull { name -> TradingOperatingMode.entries.find { it.name == name } }
+                ?.toMutableSet()
+                ?: prefs[Keys.OPERATING_MODE]
+                    ?.let { name -> TradingOperatingMode.entries.find { it.name == name } }
+                    ?.let { mutableSetOf(it) }
+                ?: mutableSetOf(TradingOperatingMode.OBSERVATION, TradingOperatingMode.ASSISTANT)
+
+            if (mode in current) {
+                if (current.size > 1) {
+                    current.remove(mode)
+                }
+            } else {
+                if (mode == TradingOperatingMode.AUTOMATED && prefs[Keys.AUTO_AUTHORIZED] != true) {
+                    return@edit
+                }
+                if (prefs[Keys.EMERGENCY_STOP] == true && mode != TradingOperatingMode.OBSERVATION) {
+                    return@edit
+                }
+                current.add(mode)
+            }
+            val names = current.map { it.name }.toSet().ifEmpty { setOf(TradingOperatingMode.OBSERVATION.name) }
+            prefs[Keys.ACTIVE_OPERATING_MODES] = names
+            prefs[Keys.OPERATING_MODE] = when {
+                TradingOperatingMode.AUTOMATED.name in names -> TradingOperatingMode.AUTOMATED.name
+                TradingOperatingMode.ASSISTANT.name in names -> TradingOperatingMode.ASSISTANT.name
+                else -> TradingOperatingMode.OBSERVATION.name
+            }
+        }
+    }
+
+    suspend fun enableAllOperatingModes(authorizeAutomatedIfRequested: Boolean = false) {
+        context.jarvisDataStore.edit { prefs ->
+            if (prefs[Keys.EMERGENCY_STOP] == true) {
+                prefs[Keys.ACTIVE_OPERATING_MODES] = setOf(TradingOperatingMode.OBSERVATION.name)
+                prefs[Keys.OPERATING_MODE] = TradingOperatingMode.OBSERVATION.name
+                return@edit
+            }
+            if (authorizeAutomatedIfRequested) {
+                prefs[Keys.AUTO_AUTHORIZED] = true
+            }
+            val autoAllowed = prefs[Keys.AUTO_AUTHORIZED] == true
+            val modes = buildSet {
+                add(TradingOperatingMode.OBSERVATION.name)
+                add(TradingOperatingMode.ASSISTANT.name)
+                if (autoAllowed) add(TradingOperatingMode.AUTOMATED.name)
+            }
+            prefs[Keys.ACTIVE_OPERATING_MODES] = modes
+            prefs[Keys.OPERATING_MODE] = if (autoAllowed) {
+                TradingOperatingMode.AUTOMATED.name
+            } else {
+                TradingOperatingMode.ASSISTANT.name
             }
         }
     }
 
     suspend fun setAutomatedAuthorized(authorized: Boolean) {
-        context.jarvisDataStore.edit {
-            it[Keys.AUTO_AUTHORIZED] = authorized
-            if (!authorized && it[Keys.OPERATING_MODE] == TradingOperatingMode.AUTOMATED.name) {
-                it[Keys.OPERATING_MODE] = TradingOperatingMode.OBSERVATION.name
+        context.jarvisDataStore.edit { prefs ->
+            prefs[Keys.AUTO_AUTHORIZED] = authorized
+            val current = prefs[Keys.ACTIVE_OPERATING_MODES]?.toMutableSet()
+                ?: mutableSetOf(prefs[Keys.OPERATING_MODE] ?: TradingOperatingMode.OBSERVATION.name)
+            if (!authorized) {
+                current.remove(TradingOperatingMode.AUTOMATED.name)
+                if (current.isEmpty()) current.add(TradingOperatingMode.OBSERVATION.name)
+                prefs[Keys.ACTIVE_OPERATING_MODES] = current
+                if (prefs[Keys.OPERATING_MODE] == TradingOperatingMode.AUTOMATED.name) {
+                    prefs[Keys.OPERATING_MODE] = current.first()
+                }
             }
         }
     }
 
     suspend fun setEmergencyStop(active: Boolean) {
-        context.jarvisDataStore.edit {
-            it[Keys.EMERGENCY_STOP] = active
+        context.jarvisDataStore.edit { prefs ->
+            prefs[Keys.EMERGENCY_STOP] = active
             if (active) {
-                it[Keys.AUTO_AUTHORIZED] = false
-                it[Keys.OPERATING_MODE] = TradingOperatingMode.OBSERVATION.name
+                prefs[Keys.AUTO_AUTHORIZED] = false
+                prefs[Keys.OPERATING_MODE] = TradingOperatingMode.OBSERVATION.name
+                prefs[Keys.ACTIVE_OPERATING_MODES] = setOf(TradingOperatingMode.OBSERVATION.name)
             }
         }
     }
@@ -214,5 +323,9 @@ class JarvisPreferencesRepository(private val context: Context) {
 
     suspend fun setPreferredBroker(broker: String) {
         context.jarvisDataStore.edit { it[Keys.PREFERRED_BROKER] = broker }
+    }
+
+    suspend fun setFloatingOrbEnabled(enabled: Boolean) {
+        context.jarvisDataStore.edit { it[Keys.FLOATING_ORB_ENABLED] = enabled }
     }
 }

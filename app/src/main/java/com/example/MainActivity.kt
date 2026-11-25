@@ -7,7 +7,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import com.example.ui.JarvisApp
-import com.example.updates.JarvisUpdatePrompt
 import com.example.ui.JarvisViewModel
 
 class MainActivity : ComponentActivity() {
@@ -17,16 +16,21 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        intent?.data?.let { viewModel.handleDeepLink(it) }
+        handleIncomingIntent(intent)
         setContent {
             JarvisApp(viewModel = viewModel)
-            JarvisUpdatePrompt()
         }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        intent.data?.let { viewModel.handleDeepLink(it) }
+        handleIncomingIntent(intent)
+    }
+
+    private fun handleIncomingIntent(intent: Intent?) {
+        if (intent?.action == Intent.ACTION_ASSIST) {
+            viewModel.onAssistTriggered()
+        }
     }
 }

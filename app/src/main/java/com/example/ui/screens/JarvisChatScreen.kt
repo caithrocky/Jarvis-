@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -22,7 +21,6 @@ import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -87,16 +85,16 @@ fun JarvisChatScreen(
             .fillMaxSize()
             .padding(horizontal = 16.dp, vertical = 10.dp)
     ) {
-        // Header + Compact Voice Orb
+        // Header + Memory / Interrupt actions
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("JARVIS INTELLIGENCE", style = MaterialTheme.typography.headlineMedium, color = ElectricBlue)
+                Text("J.A.R.V.I.S ASSISTANT", style = MaterialTheme.typography.headlineMedium, color = ElectricBlue)
                 Text(
-                    text = "Model: ${settings.selectedModelId.substringAfterLast("/")}",
+                    text = "Personal Assistant & Floating Plugin • ${settings.selectedModelId.substringAfterLast("/")}",
                     style = MaterialTheme.typography.labelMedium,
                     color = jc.mutedSlate
                 )
@@ -142,7 +140,7 @@ fun JarvisChatScreen(
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        text = "Memory: ${if (settings.memoryEnabled) "${memories.size} stored facts" else "Disabled"}",
+                        text = "Memory: ${if (settings.memoryEnabled) "${memories.size} stored facts" else "Disabled"} • Live web search active",
                         style = MaterialTheme.typography.labelSmall,
                         color = jc.mutedSlate
                     )
@@ -163,13 +161,13 @@ fun JarvisChatScreen(
                 item {
                     HudGlassCard {
                         Text(
-                            text = "Say \"Hey JARVIS\" or type a financial question below.",
+                            text = "Say \"Hey JARVIS\" or ask me anything, Sir.",
                             style = MaterialTheme.typography.titleMedium,
                             color = ArcCyan
                         )
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            text = "Try: \"What's happening in the markets?\", \"Analyze EUR/USD\", \"Check my Deriv account\", or \"Monitor Bitcoin and notify me about 3% movements.\"",
+                            text = "Try: \"Open tradingview.com in Chrome\", \"Sign me up on GitHub with my permission\", \"Guide me on this screen\", \"Analyze what is on my screen\", \"Search the internet for gold market outlook\", or \"Open Wi-Fi settings\".",
                             style = MaterialTheme.typography.bodyMedium,
                             color = jc.mutedSlate
                         )
@@ -227,7 +225,7 @@ fun JarvisChatScreen(
             OutlinedTextField(
                 value = inputText,
                 onValueChange = { inputText = it },
-                placeholder = { Text("Ask JARVIS about markets, risk, or accounts...") },
+                placeholder = { Text("Ask online, open Chrome site, sign in, or guide screen...") },
                 singleLine = true,
                 modifier = Modifier
                     .weight(1f)

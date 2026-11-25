@@ -36,8 +36,19 @@ object SecretsConfig {
             .trimEnd('/')
     }
 
+    @Volatile
+    private var runtimeCredentialStore: SecureCredentialStore? = null
+
+    fun attachRuntimeStore(store: SecureCredentialStore) {
+        runtimeCredentialStore = store
+    }
+
     val nvidiaNimApiKey: String?
         get() = cleanSecret(BuildConfig.NVIDIA_NIM_API_KEY)
+            ?: cleanSecret(runtimeCredentialStore?.getDecrypted(SecureCredentialStore.KEY_NVIDIA_NIM_API_OVERRIDE))
+
+    val hasBuildConfigNvidiaNim: Boolean
+        get() = cleanSecret(BuildConfig.NVIDIA_NIM_API_KEY) != null
 
     val supabaseUrl: String?
         get() = normalizeHttpsUrl(BuildConfig.SUPABASE_URL)

@@ -60,7 +60,22 @@ class JarvisVoiceEngine(
 
     private var speechRecognizer: SpeechRecognizer? = null
     private var tts: TextToSpeech? = null
+    @Volatile
     private var ttsReady = false
+    @Volatile
+    private var ttsInitFailed = false
+    @Volatile
+    private var forceStandardRecognizer = false
+
+    private data class PendingUtterance(
+        val text: String,
+        val token: Int,
+        val followUpListen: Boolean
+    )
+
+    @Volatile
+    private var pendingUtterance: PendingUtterance? = null
+    private var pendingListenRunnable: Runnable? = null
 
     @Volatile
     private var activeAudioTrack: AudioTrack? = null
@@ -89,7 +104,7 @@ class JarvisVoiceEngine(
     private val _bluetoothConnected = MutableStateFlow(false)
     val bluetoothConnected: StateFlow<Boolean> = _bluetoothConnected.asStateFlow()
 
-    private val _statusDetail = MutableStateFlow("Microphone standby")
+    private val _statusDetail = MutableStateFlow("Tap the orb to speak or say \"Hey JARVIS\"")
     val statusDetail: StateFlow<String> = _statusDetail.asStateFlow()
 
     init {
@@ -106,16 +121,25 @@ class JarvisVoiceEngine(
     }
 
     fun configureVoice(personality: VoicePersonality, speed: Float, useNvidiaMagpie: Boolean = useNeuralNimTts) {
+        val personalityChanged = currentPersonality != personality
         currentPersonality = personality
         currentSpeed = speed
         useNeuralNimTts = useNvidiaMagpie
         tts?.setPitch(personality.pitch)
         tts?.setSpeechRate(speed)
+        if (personalityChanged && ttsReady) {
+            mainHandler.post { applyPreferredDeviceVoice() }
+        }
     }
 
     fun hasMicPermission(): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
+
+    fun isMediaVolumeZero(): Boolean {
+        val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        return current <= 0
+    }
 
     fun refreshBluetoothState() {
         val btActive = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -139,7 +163,7 @@ class JarvisVoiceEngine(
         alwaysOnEnabled = true
         continuousSession = false
         _phase.value = VoicePipelinePhase.WAKE_WORD_STANDBY
-        _statusDetail.value = "Listening locally for \"Hey JARVIS\""
+        _statusDetail.value = "Listening for \"Hey JARVIS\""
         mainHandler.post { startRecognizerSession() }
     }
 
@@ -151,17 +175,19 @@ class JarvisVoiceEngine(
         interruptSpeech()
         continuousSession = true
         _phase.value = VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
-        _statusDetail.value = "Listening to your request, Sir..."
+        _statusDetail.value = "Listening, Sir..."
         mainHandler.post { startRecognizerSession() }
     }
 
     fun stopAllListening() {
         alwaysOnEnabled = false
         continuousSession = false
+        pendingListenRunnable?.let { mainHandler.removeCallbacks(it) }
+        pendingListenRunnable = null
         _phase.value = VoicePipelinePhase.STOPPED
         _rmsLevel.value = 0f
         _partialTranscript.value = ""
-        _statusDetail.value = "Always-on listening paused"
+        _statusDetail.value = "Tap the orb to speak"
         mainHandler.post {
             runCatching { speechRecognizer?.cancel() }
             runCatching { speechRecognizer?.destroy() }
@@ -170,36 +196,44 @@ class JarvisVoiceEngine(
     }
 
     fun speak(text: String, followUpListen: Boolean = true) {
-        if (text.isBlank()) return
+        val clean = sanitizeSpeechInput(text)
+        if (clean.isBlank()) return
+
         val token = speechGeneration.incrementAndGet()
         activeNeuralJob?.cancel()
+        pendingUtterance = null
         stopAudioTrack()
 
         if (useNeuralNimTts && magpieTtsClient != null && SecretsConfig.hasNvidiaNim) {
             mainHandler.post { runCatching { speechRecognizer?.cancel() } }
             _phase.value = VoicePipelinePhase.SPEAKING_RESPONSE
-            _statusDetail.value = "JARVIS speaking (${currentPersonality.nimVoiceName.substringAfterLast(".")})"
+            _statusDetail.value = "Speaking (${currentPersonality.nimVoiceName.substringAfterLast(".")})"
 
             activeNeuralJob = engineScope.launch {
-                val synthResult = magpieTtsClient.synthesize(text, currentPersonality)
+                val synthResult = magpieTtsClient.synthesize(clean, currentPersonality)
                 if (!isActive || speechGeneration.get() != token) return@launch
 
                 val audio = synthResult.getOrNull()
                 if (audio != null && audio.pcmBytes.isNotEmpty()) {
-                    playPcmAudio(audio, token, followUpListen)
+                    playPcmAudio(audio, clean, token, followUpListen)
                 } else {
-                    // Graceful fallback to on-device British/English TTS
-                    speakWithDeviceTts(text, token, followUpListen)
+                    // Fallback to device TTS with the exact reply text
+                    speakWithDeviceTts(clean, token, followUpListen)
                 }
             }
             return
         }
 
-        speakWithDeviceTts(text, token, followUpListen)
+        speakWithDeviceTts(clean, token, followUpListen)
     }
 
-    private fun playPcmAudio(audio: SynthesizedAudio, token: Int, followUpListen: Boolean) {
-        mainHandler.post { requestAudioFocus() }
+    private fun playPcmAudio(
+        audio: SynthesizedAudio,
+        originalText: String,
+        token: Int,
+        followUpListen: Boolean
+    ) {
+        requestAudioFocus()
 
         val channelMask = if (audio.channels >= 2) {
             AudioFormat.CHANNEL_OUT_STEREO
@@ -211,10 +245,15 @@ class JarvisVoiceEngine(
         } else {
             AudioFormat.ENCODING_PCM_16BIT
         }
+        val bytesPerSample = (audio.bitsPerSample / 8).coerceAtLeast(1)
+        val frameBytes = (audio.channels.coerceAtLeast(1) * bytesPerSample).coerceAtLeast(1)
+        val totalFrames = (audio.pcmBytes.size / frameBytes).coerceAtLeast(1)
         val minBuf = AudioTrack.getMinBufferSize(audio.sampleRateHz, channelMask, encoding)
             .coerceAtLeast(4096)
 
+        val useStatic = audio.pcmBytes.size <= 1_500_000
         val track = runCatching {
+            val bufSize = if (useStatic) audio.pcmBytes.size.coerceAtLeast(minBuf) else minBuf
             AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
@@ -229,34 +268,79 @@ class JarvisVoiceEngine(
                         .setChannelMask(channelMask)
                         .build()
                 )
-                .setBufferSizeInBytes(minBuf)
-                .setTransferMode(AudioTrack.MODE_STREAM)
+                .setBufferSizeInBytes(bufSize)
+                .setTransferMode(if (useStatic) AudioTrack.MODE_STATIC else AudioTrack.MODE_STREAM)
                 .build()
         }.getOrNull()
 
         if (track == null) {
-            speakWithDeviceTts("At your service, Sir.", token, followUpListen)
+            speakWithDeviceTts(originalText, token, followUpListen)
             return
         }
 
         activeAudioTrack = track
+        var playbackFailed = false
         runCatching {
-            track.play()
-            val frameSize = 2048
-            var offset = 0
-            while (offset < audio.pcmBytes.size && speechGeneration.get() == token) {
-                val len = minOf(frameSize, audio.pcmBytes.size - offset)
-                val written = track.write(audio.pcmBytes, offset, len)
-                if (written <= 0) break
-                _rmsLevel.value = computePcmRms(audio.pcmBytes, offset, len)
-                offset += written
+            if (useStatic) {
+                var writtenTotal = 0
+                while (writtenTotal < audio.pcmBytes.size && speechGeneration.get() == token) {
+                    val w = track.write(audio.pcmBytes, writtenTotal, audio.pcmBytes.size - writtenTotal)
+                    if (w <= 0) break
+                    writtenTotal += w
+                }
+                if (writtenTotal <= 0) {
+                    playbackFailed = true
+                } else {
+                    track.play()
+                    val startedAt = System.currentTimeMillis()
+                    val expectedDurationMs = (totalFrames * 1000L / audio.sampleRateHz.coerceAtLeast(8000)) + 250L
+                    while (speechGeneration.get() == token) {
+                        val playedFrames = runCatching { track.playbackHeadPosition }.getOrDefault(totalFrames)
+                        if (playedFrames >= totalFrames - 32) break
+                        if (System.currentTimeMillis() - startedAt > expectedDurationMs + 1200L) break
+
+                        val byteOffset = (playedFrames * frameBytes).coerceIn(0, (audio.pcmBytes.size - 2).coerceAtLeast(0))
+                        val winLen = minOf(1024, audio.pcmBytes.size - byteOffset)
+                        if (winLen >= 2) {
+                            _rmsLevel.value = computePcmRms(audio.pcmBytes, byteOffset, winLen)
+                        }
+                        Thread.sleep(40L)
+                    }
+                }
+            } else {
+                track.play()
+                val chunk = 2048
+                var offset = 0
+                while (offset < audio.pcmBytes.size && speechGeneration.get() == token) {
+                    val len = minOf(chunk, audio.pcmBytes.size - offset)
+                    val written = track.write(audio.pcmBytes, offset, len)
+                    if (written <= 0) break
+                    _rmsLevel.value = computePcmRms(audio.pcmBytes, offset, len)
+                    offset += written
+                }
+                // Wait for remaining queued frames to finish playing out of speaker
+                val startDrain = System.currentTimeMillis()
+                while (speechGeneration.get() == token) {
+                    val head = runCatching { track.playbackHeadPosition }.getOrDefault(totalFrames)
+                    if (head >= totalFrames - 64) break
+                    if (System.currentTimeMillis() - startDrain > 2500L) break
+                    Thread.sleep(40L)
+                }
             }
             if (speechGeneration.get() == token) {
-                track.stop()
+                runCatching { track.stop() }
             }
+        }.onFailure {
+            playbackFailed = true
         }
+
         runCatching { track.release() }
         if (activeAudioTrack === track) activeAudioTrack = null
+
+        if (playbackFailed && speechGeneration.get() == token) {
+            speakWithDeviceTts(originalText, token, followUpListen)
+            return
+        }
 
         if (speechGeneration.get() == token) {
             onSpeechCompleted(followUpListen)
@@ -273,22 +357,41 @@ class JarvisVoiceEngine(
             sumSq += s * s
         }
         val rms = sqrt(sumSq / samples.coerceAtLeast(1)).toFloat()
-        return (rms * 3.4f).coerceIn(0.12f, 1.0f)
+        return (rms * 3.4f).coerceIn(0.14f, 1.0f)
     }
 
     private fun speakWithDeviceTts(text: String, token: Int, followUpListen: Boolean) {
         if (speechGeneration.get() != token) return
         if (!ttsReady) {
-            onSpeechCompleted(followUpListen)
+            if (ttsInitFailed || tts == null) {
+                pendingUtterance = PendingUtterance(text, token, followUpListen)
+                ttsInitFailed = false
+                mainHandler.post { initTts() }
+            } else {
+                pendingUtterance = PendingUtterance(text, token, followUpListen)
+            }
+            _phase.value = VoicePipelinePhase.SPEAKING_RESPONSE
+            _statusDetail.value = "Preparing voice engine..."
             return
         }
-        val spokenText = magpieTtsClient?.sanitizeForSpeech(text) ?: text
+
+        val spokenText = sanitizeSpeechInput(text)
         mainHandler.post {
             if (speechGeneration.get() != token) return@post
             runCatching { speechRecognizer?.cancel() }
             requestAudioFocus()
             _phase.value = VoicePipelinePhase.SPEAKING_RESPONSE
-            _statusDetail.value = "JARVIS speaking (tap or speak to interrupt)"
+            _statusDetail.value = if (isMediaVolumeZero()) {
+                "Speaking (Device media volume is 0)"
+            } else {
+                "JARVIS speaking (tap orb to interrupt)"
+            }
+            tts?.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
             tts?.setPitch(currentPersonality.pitch)
             tts?.setSpeechRate(currentSpeed)
             val utteranceId = UUID.randomUUID().toString()
@@ -305,12 +408,21 @@ class JarvisVoiceEngine(
 
                 @Deprecated("Deprecated in Java")
                 override fun onError(id: String?) {
-                    _rmsLevel.value = 0f
-                    abandonAudioFocus()
-                    _phase.value = if (alwaysOnEnabled) VoicePipelinePhase.WAKE_WORD_STANDBY else VoicePipelinePhase.STOPPED
+                    if (speechGeneration.get() == token) {
+                        onSpeechCompleted(followUpListen)
+                    }
+                }
+
+                override fun onError(utteranceId: String?, errorCode: Int) {
+                    if (speechGeneration.get() == token) {
+                        onSpeechCompleted(followUpListen)
+                    }
                 }
             })
-            tts?.speak(spokenText, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+            val result = tts?.speak(spokenText, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+            if (result == TextToSpeech.ERROR) {
+                onSpeechCompleted(followUpListen)
+            }
         }
     }
 
@@ -318,19 +430,28 @@ class JarvisVoiceEngine(
         _rmsLevel.value = 0f
         mainHandler.post {
             abandonAudioFocus()
-            if (alwaysOnEnabled) {
-                _phase.value = if (followUpListen) VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE else VoicePipelinePhase.WAKE_WORD_STANDBY
-                _statusDetail.value = if (followUpListen) "Follow-up listening, Sir..." else "Listening locally for \"Hey JARVIS\""
-                scheduleNextListen(250L)
+            if (alwaysOnEnabled || (followUpListen && continuousSession)) {
+                _phase.value = if (followUpListen) {
+                    VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
+                } else {
+                    VoicePipelinePhase.WAKE_WORD_STANDBY
+                }
+                _statusDetail.value = if (followUpListen) {
+                    "Listening for follow-up, Sir..."
+                } else {
+                    "Listening for \"Hey JARVIS\""
+                }
+                scheduleNextListen(260L)
             } else {
                 _phase.value = VoicePipelinePhase.STOPPED
-                _statusDetail.value = "Ready"
+                _statusDetail.value = "Tap orb to speak"
             }
         }
     }
 
     fun interruptSpeech() {
         speechGeneration.incrementAndGet()
+        pendingUtterance = null
         activeNeuralJob?.cancel()
         stopAudioTrack()
         mainHandler.post {
@@ -341,7 +462,7 @@ class JarvisVoiceEngine(
             abandonAudioFocus()
             if (_phase.value == VoicePipelinePhase.SPEAKING_RESPONSE) {
                 _phase.value = if (alwaysOnEnabled) VoicePipelinePhase.WAKE_WORD_STANDBY else VoicePipelinePhase.STOPPED
-                _statusDetail.value = "Ready"
+                _statusDetail.value = if (alwaysOnEnabled) "Listening for \"Hey JARVIS\"" else "Ready"
             }
         }
     }
@@ -369,33 +490,69 @@ class JarvisVoiceEngine(
     }
 
     private fun initTts() {
+        runCatching { tts?.shutdown() }
+        ttsReady = false
         tts = TextToSpeech(context.applicationContext) { status ->
             if (status == TextToSpeech.SUCCESS) {
-                // Prefer British English (en-GB) for JARVIS fallback if installed on device
-                val ukResult = tts?.setLanguage(Locale.UK)
-                if (ukResult == TextToSpeech.LANG_MISSING_DATA || ukResult == TextToSpeech.LANG_NOT_SUPPORTED) {
-                    tts?.language = Locale.US
-                } else {
-                    val preferredUkVoice = runCatching {
-                        tts?.voices?.firstOrNull { voice ->
-                            voice.locale.language == "en" &&
-                                voice.locale.country == "GB" &&
-                                !voice.isNetworkConnectionRequired &&
-                                voice.name.contains("male", ignoreCase = true)
-                        } ?: tts?.voices?.firstOrNull { voice ->
-                            voice.locale.language == "en" &&
-                                voice.locale.country == "GB" &&
-                                !voice.isNetworkConnectionRequired
-                        }
-                    }.getOrNull()
-                    if (preferredUkVoice != null) {
-                        runCatching { tts?.voice = preferredUkVoice }
-                    }
-                }
+                tts?.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                applyPreferredDeviceVoice()
                 tts?.setPitch(currentPersonality.pitch)
                 tts?.setSpeechRate(currentSpeed)
                 ttsReady = true
+                ttsInitFailed = false
+
+                val queued = pendingUtterance
+                pendingUtterance = null
+                if (queued != null && speechGeneration.get() == queued.token) {
+                    speakWithDeviceTts(queued.text, queued.token, queued.followUpListen)
+                }
+            } else {
+                ttsReady = false
+                ttsInitFailed = true
+                val queued = pendingUtterance
+                pendingUtterance = null
+                if (queued != null && speechGeneration.get() == queued.token) {
+                    _statusDetail.value = "Device speech engine unavailable"
+                    onSpeechCompleted(queued.followUpListen)
+                }
             }
+        }
+    }
+
+    private fun applyPreferredDeviceVoice() {
+        val engine = tts ?: return
+        val wantFemale = currentPersonality == VoicePersonality.CALM_MENTOR
+        val targetLocale = if (wantFemale) Locale.US else Locale.UK
+        val langResult = engine.setLanguage(targetLocale)
+        if (langResult == TextToSpeech.LANG_MISSING_DATA || langResult == TextToSpeech.LANG_NOT_SUPPORTED) {
+            val usResult = engine.setLanguage(Locale.US)
+            if (usResult == TextToSpeech.LANG_MISSING_DATA || usResult == TextToSpeech.LANG_NOT_SUPPORTED) {
+                engine.setLanguage(Locale.getDefault())
+            }
+        }
+        val matchingVoice = runCatching {
+            val voices = engine.voices.orEmpty().filter { it.locale.language == "en" }
+            val offline = voices.filter { !it.isNetworkConnectionRequired }.ifEmpty { voices }
+            if (wantFemale) {
+                offline.firstOrNull {
+                    it.name.contains("female", ignoreCase = true) ||
+                        it.name.contains("aria", ignoreCase = true) ||
+                        it.name.contains("sfg", ignoreCase = true) ||
+                        it.name.contains("tpf", ignoreCase = true)
+                }
+            } else {
+                offline.firstOrNull {
+                    it.locale.country == "GB" && it.name.contains("male", ignoreCase = true)
+                } ?: offline.firstOrNull { it.locale.country == "GB" }
+            }
+        }.getOrNull()
+        if (matchingVoice != null) {
+            runCatching { engine.voice = matchingVoice }
         }
     }
 
@@ -429,12 +586,25 @@ class JarvisVoiceEngine(
 
                 override fun onError(error: Int) {
                     _rmsLevel.value = 0f
+
+                    // If on-device STT failed with missing model / server error, fall back to standard STT automatically
+                    val onDeviceError = error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ||
+                        error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED ||
+                        error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
+                        error == SpeechRecognizer.ERROR_CLIENT
+                    if (!forceStandardRecognizer && onDeviceError) {
+                        forceStandardRecognizer = true
+                        scheduleNextListen(220L)
+                        return
+                    }
+
                     if (alwaysOnEnabled && _phase.value != VoicePipelinePhase.SPEAKING_RESPONSE) {
-                        val backoffMs = if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 900L else 450L
+                        val backoffMs = if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 900L else 420L
                         scheduleNextListen(backoffMs)
                     } else if (!alwaysOnEnabled) {
+                        continuousSession = false
                         _phase.value = VoicePipelinePhase.STOPPED
-                        _statusDetail.value = "Tap orb or speak wake word"
+                        _statusDetail.value = mapRecognizerError(error)
                     }
                 }
 
@@ -451,7 +621,7 @@ class JarvisVoiceEngine(
                     if (text.isNotBlank()) {
                         _partialTranscript.value = text
                         if (_phase.value == VoicePipelinePhase.WAKE_WORD_STANDBY && matchesWakePhrase(text)) {
-                            _statusDetail.value = "Wake phrase recognized!"
+                            _statusDetail.value = "Yes, Sir..."
                         }
                     }
                 }
@@ -460,18 +630,31 @@ class JarvisVoiceEngine(
             })
         }
 
+        val useOffline = !forceStandardRecognizer && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
+
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.US.toLanguageTag())
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1300L)
+            if (useOffline) {
+                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            }
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1400L)
         }
-        runCatching { speechRecognizer?.startListening(intent) }
+        runCatching {
+            speechRecognizer?.startListening(intent)
+        }.onFailure {
+            _statusDetail.value = "Speech recognizer unavailable on device"
+            if (!alwaysOnEnabled) {
+                _phase.value = VoicePipelinePhase.STOPPED
+            }
+        }
     }
 
     private fun createBestSpeechRecognizer(): SpeechRecognizer {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+        return if (!forceStandardRecognizer &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
         ) {
             SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
@@ -480,25 +663,44 @@ class JarvisVoiceEngine(
         }
     }
 
+    private fun mapRecognizerError(error: Int): String = when (error) {
+        SpeechRecognizer.ERROR_NO_MATCH,
+        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Didn't catch that — tap orb to speak"
+        SpeechRecognizer.ERROR_AUDIO -> "Microphone busy — tap orb to retry"
+        SpeechRecognizer.ERROR_NETWORK,
+        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Voice recognition offline — tap orb to retry"
+        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission needed"
+        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Voice service busy — tap orb to retry"
+        else -> "Tap orb to speak"
+    }
+
     private fun handleRecognizedText(text: String, isFinal: Boolean) {
         if (!isFinal) return
         _partialTranscript.value = ""
 
         if (text.isBlank()) {
-            if (alwaysOnEnabled) scheduleNextListen(350L) else _phase.value = VoicePipelinePhase.STOPPED
+            if (alwaysOnEnabled) {
+                scheduleNextListen(350L)
+            } else {
+                continuousSession = false
+                _phase.value = VoicePipelinePhase.STOPPED
+                _statusDetail.value = "Tap orb to speak"
+            }
             return
         }
 
         if (_phase.value == VoicePipelinePhase.WAKE_WORD_STANDBY) {
             if (matchesWakePhrase(text)) {
                 val remainder = stripWakePhrase(text)
+                onWakeDetected?.invoke()
                 if (remainder.isNotBlank()) {
                     _phase.value = VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
+                    continuousSession = true
                     onCommandCaptured?.invoke(remainder)
                 } else {
                     _phase.value = VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
-                    onWakeDetected?.invoke()
-                    speak("At your service, Sir. What would you like me to analyze?", followUpListen = true)
+                    continuousSession = true
+                    speak("Yes Sir, I'm listening. How can I help?", followUpListen = true)
                 }
             } else if (alwaysOnEnabled) {
                 scheduleNextListen(300L)
@@ -507,33 +709,44 @@ class JarvisVoiceEngine(
         }
 
         if (_phase.value == VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE) {
-            continuousSession = false
             onCommandCaptured?.invoke(text)
         }
     }
 
-    private fun matchesWakePhrase(text: String): Boolean {
-        val lower = text.lowercase(Locale.US)
+    internal fun matchesWakePhrase(text: String): Boolean {
+        val lower = text.lowercase(Locale.US).trim()
         return lower.contains("hey jarvis") ||
             lower.contains("ok jarvis") ||
+            lower.contains("hi jarvis") ||
             lower.startsWith("jarvis") ||
             lower.contains("hey service")
     }
 
-    private fun stripWakePhrase(text: String): String {
+    internal fun stripWakePhrase(text: String): String {
         return text
-            .replace(Regex("(?i)\\b(hey|ok)\\s+(jarvis|service)\\b[:,]?\\s*"), "")
+            .replace(Regex("(?i)\\b(hey|ok|hi)\\s+(jarvis|service)\\b[:,]?\\s*"), "")
             .replace(Regex("(?i)^jarvis[:,]?\\s*"), "")
             .trim()
     }
 
+    internal fun sanitizeSpeechInput(raw: String): String {
+        return magpieTtsClient?.sanitizeForSpeech(raw) ?: raw
+            .replace(Regex("https?://\\S+"), "")
+            .replace(Regex("[*_`~#>]"), "")
+            .replace(Regex("\\s*[•|]\\s*"), ", ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
     private fun scheduleNextListen(delayMs: Long) {
-        mainHandler.removeCallbacksAndMessages(null)
-        mainHandler.postDelayed({
-            if (alwaysOnEnabled && _phase.value != VoicePipelinePhase.SPEAKING_RESPONSE) {
+        pendingListenRunnable?.let { mainHandler.removeCallbacks(it) }
+        val r = Runnable {
+            if ((alwaysOnEnabled || continuousSession) && _phase.value != VoicePipelinePhase.SPEAKING_RESPONSE) {
                 startRecognizerSession()
             }
-        }, delayMs)
+        }
+        pendingListenRunnable = r
+        mainHandler.postDelayed(r, delayMs)
     }
 
     private fun requestAudioFocus() {

@@ -47,7 +47,7 @@ import java.util.concurrent.TimeUnit
 private const val PREFS = "jarvis_updater"
 private const val KEY_DISMISSED = "dismissed_version"
 private const val KEY_LAST_CHECK = "last_check_ms"
-private const val CHECK_INTERVAL_MS = 6L * 60L * 60L * 1000L
+private const val CHECK_INTERVAL_MS = 15L * 60L * 1000L
 private const val RELEASE_URL = "https://api.github.com/repos/caithrocky/Jarvis-/releases/latest"
 private const val APK_ASSET = "Jarvis.apk"
 private const val SHA_ASSET = "Jarvis.apk.sha256"
@@ -61,7 +61,10 @@ private data class JarvisUpdate(
 )
 
 @Composable
-fun JarvisUpdatePrompt(forceCheck: Boolean = false) {
+fun JarvisUpdatePrompt(
+    manualCheckTrigger: Int = 0,
+    onCheckStatusMessage: ((String) -> Unit)? = null
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val client = remember { newClient() }
@@ -78,7 +81,8 @@ fun JarvisUpdatePrompt(forceCheck: Boolean = false) {
         dismissed = true
     }
 
-    LaunchedEffect(forceCheck) {
+    LaunchedEffect(manualCheckTrigger) {
+        val forceCheck = manualCheckTrigger > 0
         val prefs = prefs(context)
         val now = System.currentTimeMillis()
         if (!forceCheck && now - prefs.getLong(KEY_LAST_CHECK, 0L) < CHECK_INTERVAL_MS) {
@@ -93,6 +97,18 @@ fun JarvisUpdatePrompt(forceCheck: Boolean = false) {
                     update = latest
                     dismissed = false
                 }
+            } else if (forceCheck) {
+                onCheckStatusMessage?.invoke(
+                    if (latest == null) {
+                        "No published GitHub release APK found yet (installed v$installedVersion)."
+                    } else {
+                        "You are up to date (installed v$installedVersion, latest v${latest.versionName})."
+                    }
+                )
+            }
+        }.onFailure { err ->
+            if (forceCheck) {
+                onCheckStatusMessage?.invoke("Update check failed: ${err.message ?: "Network error"}")
             }
         }
     }

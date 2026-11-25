@@ -121,19 +121,42 @@ data class TradingOpportunity(
     val disclaimer: String = "Analytical probability only — not financial advice or a guaranteed outcome."
 )
 
+enum class JarvisChoiceActivity(val title: String, val subtitle: String) {
+    ASSISTANT(
+        title = "System Assistant",
+        subtitle = "Default all-purpose assistant: opens apps, device controls, reminders & answers."
+    ),
+    MARKETING(
+        title = "Markets & Strategy Focus",
+        subtitle = "Prioritizes markets, trading opportunities & marketing strategy when instructed."
+    )
+}
+
 enum class TradingOperatingMode(val title: String, val subtitle: String) {
     OBSERVATION(
         title = "Observation Mode",
-        subtitle = "Monitors markets & alerts only. All order execution is locked."
+        subtitle = "Monitors markets & alerts continuously. Can run alongside other modes."
     ),
     ASSISTANT(
         title = "Assistant Mode",
-        subtitle = "Proposes setups & waits for your explicit approval before execution."
+        subtitle = "Proposes setups for explicit approval & handles personal/system assistant tasks."
     ),
     AUTOMATED(
         title = "Automated Mode",
         subtitle = "Executes pre-authorized strategies strictly inside risk guardrails."
     )
+}
+
+fun Set<TradingOperatingMode>.formatModeSummary(): String {
+    if (isEmpty()) return TradingOperatingMode.OBSERVATION.title
+    if (size == TradingOperatingMode.entries.size) return "All Modes Active (Obs + Asst + Auto)"
+    return TradingOperatingMode.entries.filter { it in this }.joinToString(" + ") {
+        when (it) {
+            TradingOperatingMode.OBSERVATION -> "Observation"
+            TradingOperatingMode.ASSISTANT -> "Assistant"
+            TradingOperatingMode.AUTOMATED -> "Automated"
+        }
+    }
 }
 
 data class RiskLimits(

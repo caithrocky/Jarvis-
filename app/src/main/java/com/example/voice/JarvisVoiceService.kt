@@ -36,7 +36,7 @@ class JarvisVoiceService : Service() {
 
         val notification = JarvisNotificationHelper.buildVoiceForegroundNotification(
             this,
-            "Say \"Hey JARVIS\" to activate financial voice briefing"
+            "Say \"Hey JARVIS\" anytime to talk or open the mini-orb"
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
@@ -48,6 +48,7 @@ class JarvisVoiceService : Service() {
             startForeground(JarvisNotificationHelper.VOICE_NOTIFICATION_ID, notification)
         }
 
+        app.commandCoordinator.attachVoiceEngineCallbacks()
         app.voiceEngine.startAlwaysOnWakeWordLoop()
         return START_STICKY
     }
