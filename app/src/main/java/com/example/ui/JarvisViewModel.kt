@@ -18,6 +18,7 @@ import com.example.security.SecretsConfig
 import com.example.security.SecureCredentialStore
 import com.example.voice.JarvisFloatingOrbService
 import com.example.voice.JarvisVoiceService
+import com.example.voice.SpeakerMatchState
 import com.example.voice.VoicePipelinePhase
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -55,7 +56,17 @@ data class JarvisUiState(
     val savedCredentials: List<SecureCredentialStore.SavedCredentialEntry> = emptyList(),
     val manualUpdateCheckTrigger: Int = 0,
     val hasRuntimeNvidiaKeyOverride: Boolean = false,
-    val hasBuildConfigNvidiaKey: Boolean = false
+    val hasBuildConfigNvidiaKey: Boolean = false,
+    val learnedAppsCount: Int = 0,
+    val learnedWorkflowsCount: Int = 0,
+    val ownerHabitsCount: Int = 0,
+    val voiceEnrolled: Boolean = false,
+    val speakerStatusSummary: String = "Owner Voice ID: Not enrolled",
+    val lastSpeakerState: SpeakerMatchState? = null,
+    val speakerConfidence: Float = 0f,
+    val voiceEnrollmentProgress: String? = null,
+    val autonomousStepStatus: String = "",
+    val pendingConfirmationSummary: String? = null
 )
 
 class JarvisViewModel(application: Application) : AndroidViewModel(application) {
@@ -67,6 +78,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private val magpieTtsClient = app.magpieTtsClient
     private val voiceEngine = app.voiceEngine
     private val coordinator = app.commandCoordinator
+    private val deviceLearningEngine = app.deviceLearningEngine
     private val credentialStore = app.credentialStore
 
     private val _uiState = MutableStateFlow(JarvisUiState())
@@ -88,6 +100,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         coordinator.attachVoiceEngineCallbacks()
         observeVoiceTelemetry()
         observeCoordinatorState()
+        observeLearningAndBiometrics()
         refreshSystemCapabilitiesState()
         refreshApiStatuses()
     }
@@ -99,6 +112,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         val credentials = credentialStore.getSavedCredentials()
         val hasRuntimeKey = !credentialStore.getDecrypted(SecureCredentialStore.KEY_NVIDIA_NIM_API_OVERRIDE).isNullOrBlank()
         val hasBuildKey = SecretsConfig.hasBuildConfigNvidiaNim
+        val voiceEnrolled = voiceEngine.isOwnerVoiceEnrolled()
         _uiState.update {
             it.copy(
                 hasOverlayPermission = overlayOk,
@@ -106,7 +120,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 signupProfile = profile,
                 savedCredentials = credentials,
                 hasRuntimeNvidiaKeyOverride = hasRuntimeKey,
-                hasBuildConfigNvidiaKey = hasBuildKey
+                hasBuildConfigNvidiaKey = hasBuildKey,
+                voiceEnrolled = voiceEnrolled
             )
         }
     }
@@ -115,16 +130,21 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             combine(
                 coordinator.isProcessing,
-                coordinator.streamingReply
-            ) { processing, streaming -> processing to streaming }
-                .collect { (processing, streaming) ->
-                    _uiState.update {
-                        it.copy(
-                            isAiProcessing = processing,
-                            streamingReply = streaming
-                        )
-                    }
+                coordinator.streamingReply,
+                coordinator.autonomousStepStatus,
+                coordinator.pendingConfirmationSummary
+            ) { processing, streaming, stepStatus, pendingConfirm ->
+                Tuple4(processing, streaming, stepStatus, pendingConfirm)
+            }.collect { (processing, streaming, stepStatus, pendingConfirm) ->
+                _uiState.update {
+                    it.copy(
+                        isAiProcessing = processing,
+                        streamingReply = streaming,
+                        autonomousStepStatus = stepStatus,
+                        pendingConfirmationSummary = pendingConfirm
+                    )
                 }
+            }
         }
         viewModelScope.launch {
             coordinator.navigationEvents.collect { navTarget ->
@@ -142,6 +162,45 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             JarvisAccessibilityService.isConnected.collect { connected ->
                 _uiState.update { it.copy(isScreenHelperEnabled = connected) }
+            }
+        }
+    }
+
+    private fun observeLearningAndBiometrics() {
+        viewModelScope.launch {
+            combine(
+                localRepo.learnedApps,
+                localRepo.learnedWorkflows,
+                localRepo.ownerHabits
+            ) { apps, workflows, habits ->
+                Triple(apps.size, workflows.size, habits.size)
+            }.collect { (appsCount, wfCount, habitsCount) ->
+                _uiState.update {
+                    it.copy(
+                        learnedAppsCount = appsCount,
+                        learnedWorkflowsCount = wfCount,
+                        ownerHabitsCount = habitsCount
+                    )
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            combine(
+                voiceEngine.speakerStatusSummary,
+                voiceEngine.lastSpeakerState,
+                voiceEngine.speakerConfidence
+            ) { summary, matchState, confidence ->
+                Triple(summary, matchState, confidence)
+            }.collect { (summary, matchState, confidence) ->
+                _uiState.update {
+                    it.copy(
+                        voiceEnrolled = voiceEngine.isOwnerVoiceEnrolled(),
+                        speakerStatusSummary = summary,
+                        lastSpeakerState = matchState,
+                        speakerConfidence = confidence
+                    )
+                }
             }
         }
     }
@@ -173,6 +232,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             settings.collect { s ->
                 voiceEngine.configureVoice(s.voicePersonality, s.voiceSpeed, s.useNvidiaMagpieVoice)
+                voiceEngine.setFluToleranceEnabled(s.voiceFluAdaptationEnabled)
             }
         }
     }
@@ -324,8 +384,122 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         coordinator.manualOrbPinned = true
-        JarvisFloatingOrbService.start(app, expandBubble = true)
-        _uiState.update { it.copy(snackbarMessage = "Floating mini-orb launched over screen.") }
+        JarvisFloatingOrbService.start(
+            app,
+            expandBubble = true,
+            startListening = voiceEngine.hasMicPermission()
+        )
+        _uiState.update { it.copy(snackbarMessage = "Voice-first floating orb launched over screen.") }
+    }
+
+    fun setShowTapIndicator(enabled: Boolean) = viewModelScope.launch {
+        prefsRepo.setShowTapIndicator(enabled)
+    }
+
+    fun setShowHighlightIndicator(enabled: Boolean) = viewModelScope.launch {
+        prefsRepo.setShowHighlightIndicator(enabled)
+    }
+
+    fun setShowScrollIndicator(enabled: Boolean) = viewModelScope.launch {
+        prefsRepo.setShowScrollIndicator(enabled)
+    }
+
+    fun setVoiceBiometricLockEnabled(enabled: Boolean) = viewModelScope.launch {
+        prefsRepo.setVoiceBiometricLockEnabled(enabled)
+    }
+
+    fun setVoiceFluAdaptationEnabled(enabled: Boolean) = viewModelScope.launch {
+        prefsRepo.setVoiceFluAdaptationEnabled(enabled)
+        voiceEngine.setFluToleranceEnabled(enabled)
+    }
+
+    fun setAutoLearnDeviceDaily(enabled: Boolean) = viewModelScope.launch {
+        prefsRepo.setAutoLearnDeviceDaily(enabled)
+    }
+
+    fun setFuturisticHudMode(enabled: Boolean) = viewModelScope.launch {
+        prefsRepo.setFuturisticHudMode(enabled)
+    }
+
+    fun enrollOwnerVoice() {
+        if (!voiceEngine.hasMicPermission()) {
+            _uiState.update { it.copy(snackbarMessage = "Microphone permission is required to enroll your Voice ID, Sir.") }
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(voiceEnrollmentProgress = "Preparing 3-phrase Voice ID capture...")
+            }
+            val result = voiceEngine.enrollOwnerVoiceProfile { step, phrase ->
+                _uiState.update {
+                    it.copy(voiceEnrollmentProgress = "Sample $step/3 — Say: \"$phrase\"")
+                }
+            }
+            result.fold(
+                onSuccess = { profile ->
+                    localRepo.logAiActivity(
+                        "VOICE_ID",
+                        "Owner Voice ID enrolled (${profile.sampleCount} samples, baseline ${profile.baselinePitchHz.toInt()}Hz)"
+                    )
+                    _uiState.update {
+                        it.copy(
+                            voiceEnrolled = true,
+                            voiceEnrollmentProgress = null,
+                            snackbarMessage = "Owner Voice ID locked to you, Sir (with flu/vocal-shift adaptation active)."
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(
+                            voiceEnrollmentProgress = null,
+                            snackbarMessage = err.message ?: "Voice enrollment failed — please try again, Sir."
+                        )
+                    }
+                }
+            )
+        }
+    }
+
+    fun verifyOwnerVoiceNow() {
+        if (!voiceEngine.hasMicPermission()) {
+            _uiState.update { it.copy(snackbarMessage = "Grant Microphone permission to verify your voice, Sir.") }
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(voiceEnrollmentProgress = "Speak a short sentence now to verify...") }
+            val result = voiceEngine.verifyOwnerVoiceBurst(durationMs = 2200L)
+            _uiState.update {
+                it.copy(
+                    voiceEnrollmentProgress = null,
+                    snackbarMessage = result.detailMessage
+                )
+            }
+        }
+    }
+
+    fun clearOwnerVoice() {
+        voiceEngine.clearOwnerVoiceProfile()
+        _uiState.update {
+            it.copy(
+                voiceEnrolled = false,
+                voiceEnrollmentProgress = null,
+                snackbarMessage = "Owner Voice ID cleared from device vault."
+            )
+        }
+    }
+
+    fun studyDeviceNow() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(snackbarMessage = "Studying installed apps, screen controls, and daily habits...") }
+            val report = deviceLearningEngine.studyDeviceNow(force = true)
+            _uiState.update { it.copy(snackbarMessage = report.summaryMessage) }
+        }
+    }
+
+    fun abortAutonomousTasks() {
+        coordinator.abortAllPendingActions()
+        _uiState.update { it.copy(snackbarMessage = "All active JARVIS screen actions aborted, Sir.") }
     }
 
     fun saveSignupProfile(profile: SecureCredentialStore.SignupProfile) {
@@ -430,5 +604,6 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(apiStatuses = statuses) }
     }
 
+    private data class Tuple4<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)
     private data class Tuple5<A, B, C, D, E>(val a: A, val b: B, val c: C, val d: D, val e: E)
 }

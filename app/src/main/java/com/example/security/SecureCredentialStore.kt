@@ -229,6 +229,77 @@ class SecureCredentialStore(context: Context) {
         return chars.joinToString("")
     }
 
+    fun getOwnerVoiceProfile(): OwnerVoiceProfile? {
+        val raw = getDecrypted(KEY_OWNER_VOICE_PROFILE_JSON) ?: return null
+        return runCatching {
+            val obj = JSONObject(raw)
+            val anchorArr = obj.optJSONArray("anchorBands") ?: return null
+            val adaptiveArr = obj.optJSONArray("adaptiveBands") ?: anchorArr
+            val anchorBands = DoubleArray(anchorArr.length()) { i -> anchorArr.optDouble(i, 0.0) }
+            val adaptiveBands = DoubleArray(adaptiveArr.length()) { i -> adaptiveArr.optDouble(i, 0.0) }
+            if (anchorBands.isEmpty()) return null
+            OwnerVoiceProfile(
+                anchorBands = anchorBands,
+                adaptiveBands = adaptiveBands,
+                baselinePitchHz = obj.optDouble("baselinePitchHz", 125.0),
+                adaptivePitchHz = obj.optDouble("adaptivePitchHz", 125.0),
+                baselineZcr = obj.optDouble("baselineZcr", 0.08),
+                baselineSpectralTilt = obj.optDouble("baselineSpectralTilt", 0.5),
+                sampleCount = obj.optInt("sampleCount", 1),
+                fluAdaptedCount = obj.optInt("fluAdaptedCount", 0),
+                lastUpdatedMs = obj.optLong("lastUpdatedMs", System.currentTimeMillis())
+            )
+        }.getOrNull()
+    }
+
+    fun saveOwnerVoiceProfile(profile: OwnerVoiceProfile) {
+        val obj = JSONObject().apply {
+            put("anchorBands", JSONArray().apply { profile.anchorBands.forEach { put(it) } })
+            put("adaptiveBands", JSONArray().apply { profile.adaptiveBands.forEach { put(it) } })
+            put("baselinePitchHz", profile.baselinePitchHz)
+            put("adaptivePitchHz", profile.adaptivePitchHz)
+            put("baselineZcr", profile.baselineZcr)
+            put("baselineSpectralTilt", profile.baselineSpectralTilt)
+            put("sampleCount", profile.sampleCount)
+            put("fluAdaptedCount", profile.fluAdaptedCount)
+            put("lastUpdatedMs", profile.lastUpdatedMs)
+        }
+        putEncrypted(KEY_OWNER_VOICE_PROFILE_JSON, obj.toString())
+    }
+
+    fun clearOwnerVoiceProfile() {
+        remove(KEY_OWNER_VOICE_PROFILE_JSON)
+    }
+
+    data class OwnerVoiceProfile(
+        val anchorBands: DoubleArray,
+        val adaptiveBands: DoubleArray,
+        val baselinePitchHz: Double,
+        val adaptivePitchHz: Double,
+        val baselineZcr: Double,
+        val baselineSpectralTilt: Double,
+        val sampleCount: Int,
+        val fluAdaptedCount: Int = 0,
+        val lastUpdatedMs: Long = System.currentTimeMillis()
+    ) {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is OwnerVoiceProfile) return false
+            return anchorBands.contentEquals(other.anchorBands) &&
+                adaptiveBands.contentEquals(other.adaptiveBands) &&
+                baselinePitchHz == other.baselinePitchHz &&
+                adaptivePitchHz == other.adaptivePitchHz &&
+                sampleCount == other.sampleCount
+        }
+
+        override fun hashCode(): Int {
+            var result = anchorBands.contentHashCode()
+            result = 31 * result + adaptiveBands.contentHashCode()
+            result = 31 * result + sampleCount
+            return result
+        }
+    }
+
     data class SignupProfile(
         val fullName: String = "",
         val username: String = "",
@@ -277,5 +348,6 @@ class SecureCredentialStore(context: Context) {
         const val KEY_SIGNUP_ALLOW_AUTOFILL = "signup_allow_autofill"
         const val KEY_SAVED_CREDENTIALS_JSON = "saved_credentials_json"
         const val KEY_NVIDIA_NIM_API_OVERRIDE = "nvidia_nim_api_override"
+        const val KEY_OWNER_VOICE_PROFILE_JSON = "owner_voice_profile_json"
     }
 }

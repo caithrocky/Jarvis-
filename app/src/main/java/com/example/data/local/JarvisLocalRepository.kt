@@ -9,6 +9,9 @@ class JarvisLocalRepository(private val db: JarvisDatabase) {
     val orderAudits: Flow<List<OrderAuditEntity>> = db.orderAuditDao().observeAudits()
     val alerts: Flow<List<AlertNotificationEntity>> = db.alertNotificationDao().observeAlerts()
     val aiLogs: Flow<List<AiActivityLogEntity>> = db.aiActivityDao().observeLogs()
+    val learnedApps: Flow<List<DeviceAppKnowledgeEntity>> = db.deviceKnowledgeDao().observeLearnedApps()
+    val learnedWorkflows: Flow<List<LearnedWorkflowEntity>> = db.deviceKnowledgeDao().observeWorkflows()
+    val ownerHabits: Flow<List<OwnerHabitEntity>> = db.deviceKnowledgeDao().observeOwnerHabits()
 
     suspend fun getRecentMessages(limit: Int = 16): List<ConversationMessageEntity> =
         db.conversationDao().getRecentMessages(limit).reversed()
@@ -83,5 +86,38 @@ class JarvisLocalRepository(private val db: JarvisDatabase) {
 
     suspend fun logAiActivity(actionType: String, detail: String) {
         db.aiActivityDao().insertLog(AiActivityLogEntity(actionType = actionType, detail = detail))
+    }
+
+    suspend fun upsertDeviceApps(apps: List<DeviceAppKnowledgeEntity>) =
+        db.deviceKnowledgeDao().upsertApps(apps)
+
+    suspend fun upsertDeviceApp(app: DeviceAppKnowledgeEntity) =
+        db.deviceKnowledgeDao().upsertApp(app)
+
+    suspend fun getAllDeviceAppsSnapshot(): List<DeviceAppKnowledgeEntity> =
+        db.deviceKnowledgeDao().getAllLearnedAppsSnapshot()
+
+    suspend fun getTopWorkflows(): List<LearnedWorkflowEntity> =
+        db.deviceKnowledgeDao().getTopWorkflowsSnapshot()
+
+    suspend fun saveLearnedWorkflow(targetPackageOrSite: String, goalPhrase: String, stepsSummary: String) {
+        db.deviceKnowledgeDao().insertWorkflow(
+            LearnedWorkflowEntity(
+                targetPackageOrSite = targetPackageOrSite,
+                goalPhrase = goalPhrase,
+                stepsSummary = stepsSummary
+            )
+        )
+    }
+
+    suspend fun upsertOwnerHabit(habit: OwnerHabitEntity) =
+        db.deviceKnowledgeDao().upsertHabit(habit)
+
+    suspend fun getTopHabits(): List<OwnerHabitEntity> =
+        db.deviceKnowledgeDao().getTopHabitsSnapshot()
+
+    suspend fun clearLearnedHabitsAndWorkflows() {
+        db.deviceKnowledgeDao().clearWorkflows()
+        db.deviceKnowledgeDao().clearHabits()
     }
 }

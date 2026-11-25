@@ -56,7 +56,16 @@ enum class SystemIntentKind {
     SWITCH_ACTIVITY_MARKETING,
     SWITCH_ACTIVITY_ASSISTANT,
     ENABLE_ALL_MODES,
-    NAVIGATE_SECTION
+    NAVIGATE_SECTION,
+    TEXT_CONTACT,
+    SOCIAL_ACTION,
+    STUDY_DEVICE,
+    VISUAL_FEEDBACK_TOGGLE,
+    CLICK_NODE_INDEX,
+    SEARCH_IN_APP,
+    VERIFY_VOICE,
+    DAILY_BRIEFING,
+    AUTONOMOUS_TASK
 }
 
 data class ParsedSystemCommand(
@@ -92,13 +101,36 @@ object JarvisSystemAssistant {
         "battery", "location", "gps", "assistant", "security", "privacy",
         "accessibility", "overlay", "storage", "apps", "all apps", "notifications",
         "date", "time", "language", "developer", "network", "mobile data", "internet",
-        "general", "system", "device"
+        "general", "system", "device", "nfc", "vpn", "cast", "hotspot", "tethering",
+        "accounts", "keyboard", "about", "about phone", "dark theme", "night display"
     )
 
     private val platformKeys = setOf(
         "youtube", "yt", "google", "reddit", "x", "twitter", "tiktok", "instagram",
         "github", "wikipedia", "wiki", "amazon", "play store", "google play",
-        "binance", "tradingview", "duckduckgo", "facebook", "linkedin"
+        "binance", "tradingview", "duckduckgo", "facebook", "linkedin", "snapchat", "threads"
+    )
+
+    private val messagingPlatformNames = mapOf(
+        "whatsapp" to "WhatsApp",
+        "whats app" to "WhatsApp",
+        "snapchat" to "Snapchat",
+        "snap" to "Snapchat",
+        "instagram" to "Instagram",
+        "insta" to "Instagram",
+        "ig" to "Instagram",
+        "telegram" to "Telegram",
+        "messenger" to "Messenger",
+        "facebook messenger" to "Messenger",
+        "signal" to "Signal",
+        "discord" to "Discord",
+        "sms" to "Messages",
+        "messages" to "Messages"
+    )
+
+    private val socialPlatformNames = setOf(
+        "instagram", "insta", "ig", "tiktok", "tik tok", "x", "twitter", "reddit",
+        "youtube", "yt", "facebook", "fb", "linkedin", "snapchat", "snap", "threads"
     )
 
     val websiteDirectory = mapOf(
@@ -183,10 +215,21 @@ object JarvisSystemAssistant {
         "spotify" to listOf("com.spotify.music"),
         "telegram" to listOf("org.telegram.messenger"),
         "instagram" to listOf("com.instagram.android"),
+        "insta" to listOf("com.instagram.android"),
+        "ig" to listOf("com.instagram.android"),
+        "snapchat" to listOf("com.snapchat.android"),
+        "snap" to listOf("com.snapchat.android"),
+        "messenger" to listOf("com.facebook.orca"),
+        "discord" to listOf("com.discord"),
+        "signal" to listOf("org.thoughtcrime.securesms"),
+        "threads" to listOf("com.instagram.barcelona"),
+        "pinterest" to listOf("com.pinterest"),
+        "twitch" to listOf("tv.twitch.android.app"),
+        "netflix" to listOf("com.netflix.mediaclient"),
         "facebook" to listOf("com.facebook.katana"),
         "x" to listOf("com.twitter.android"),
         "twitter" to listOf("com.twitter.android"),
-        "tiktok" to listOf("com.zhiliaoapp.musically"),
+        "tiktok" to listOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill"),
         "reddit" to listOf("com.reddit.frontpage"),
         "binance" to listOf("com.binance.dev"),
         "deriv" to listOf("com.deriv.app", "com.deriv.trader"),
@@ -233,7 +276,7 @@ object JarvisSystemAssistant {
     }
 
     private val compoundActionLeadRegex = Regex(
-        "^(?:please\\s+)?(?:open|launch|start|run|go\\s+to|visit|sign|log|fill|autofill|auto-fill|enter|use|type|write|search|find|look\\s+up|tap|click|press|scroll|swipe|guide|read|set|enable|turn|show|close|hide|minimize)\\b",
+        "^(?:please\\s+)?(?:open|launch|start|run|go\\s+to|visit|sign|log|fill|autofill|auto-fill|enter|use|type|write|search|find|look\\s+up|tap|click|press|scroll|swipe|guide|read|set|enable|turn|show|close|hide|minimize|like|love|repost|retweet|share|save|bookmark|follow|subscribe|next|text|message|dm|study|check|verify)\\b",
         RegexOption.IGNORE_CASE
     )
 
@@ -374,6 +417,8 @@ object JarvisSystemAssistant {
                 return ParsedSystemCommand(SystemIntentKind.GLOBAL_NAV, "lock_screen")
             lower == "take a screenshot" || lower == "take screenshot" || lower == "capture screen" ->
                 return ParsedSystemCommand(SystemIntentKind.GLOBAL_NAV, "screenshot")
+            lower == "open app drawer" || lower == "show all apps" || lower == "all apps" ->
+                return ParsedSystemCommand(SystemIntentKind.GLOBAL_NAV, "all_apps")
             lower.contains("read my screen") || lower.contains("what's on my screen") ||
                 lower.contains("what is on my screen") || lower.contains("scan this screen") ->
                 return ParsedSystemCommand(SystemIntentKind.READ_SCREEN)
@@ -381,7 +426,56 @@ object JarvisSystemAssistant {
                 return ParsedSystemCommand(SystemIntentKind.SCROLL_SCREEN, "down")
             lower == "scroll up" || lower == "swipe up" || lower == "page up" ->
                 return ParsedSystemCommand(SystemIntentKind.SCROLL_SCREEN, "up")
+            lower == "swipe left" -> return ParsedSystemCommand(SystemIntentKind.SOCIAL_ACTION, "swipe_left")
+            lower == "swipe right" -> return ParsedSystemCommand(SystemIntentKind.SOCIAL_ACTION, "swipe_right")
         }
+
+        // 3b. Self-Learning, Voice Check, Daily Briefing & Visual Feedback Controls
+        if (
+            lower.contains("study my device") || lower.contains("study this device") ||
+            lower.contains("learn my device") || lower.contains("learn my apps") ||
+            lower.contains("scan my device") || lower.contains("scan my phone") ||
+            lower.contains("study this app")
+        ) {
+            return ParsedSystemCommand(SystemIntentKind.STUDY_DEVICE, trimmed)
+        }
+
+        if (
+            lower.contains("check my voice") || lower.contains("verify my voice") ||
+            lower.contains("test my voice") || lower.contains("who is speaking") ||
+            lower.contains("voice id check") || lower.contains("i have a flu") ||
+            lower.contains("i have the flu") || lower.contains("my voice sounds sick")
+        ) {
+            return ParsedSystemCommand(SystemIntentKind.VERIFY_VOICE, trimmed)
+        }
+
+        if (
+            lower.contains("daily briefing") || lower.contains("morning briefing") ||
+            lower == "brief me" || lower.contains("what have you learned today")
+        ) {
+            return ParsedSystemCommand(SystemIntentKind.DAILY_BRIEFING)
+        }
+
+        when {
+            lower == "show taps" || lower == "turn on taps" || lower == "enable tap indicator" ->
+                return ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, "tap", "true")
+            lower == "hide taps" || lower == "turn off taps" || lower == "disable tap indicator" ->
+                return ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, "tap", "false")
+            lower == "show highlights" || lower == "enable highlights" || lower == "highlight elements" ->
+                return ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, "highlight", "true")
+            lower == "hide highlights" || lower == "disable highlights" ->
+                return ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, "highlight", "false")
+            lower == "show scroll" || lower == "show scrolling" || lower == "show scroll indicator" ->
+                return ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, "scroll", "true")
+            lower == "hide scroll" || lower == "hide scroll indicator" ->
+                return ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, "scroll", "false")
+        }
+
+        // 3c. Cross-Platform Targeted Messaging: "Text Alex hey on WhatsApp" / "Message Sarah on Snapchat saying ..."
+        parseTextContactCommand(trimmed)?.let { return it }
+
+        // 3d. Universal Social Media Navigation & Actions: "like", "repost", "scroll TikTok", "open comments", etc.
+        parseSocialActionCommand(trimmed, lower)?.let { return it }
 
         // 4. Type / Write text inside active app
         val writeMatch = Regex(
@@ -693,6 +787,112 @@ object JarvisSystemAssistant {
         return null
     }
 
+    internal fun parseTextContactCommand(trimmed: String): ParsedSystemCommand? {
+        val platformPattern = "(whatsapp|whats\\s+app|snapchat|snap|instagram|insta|ig|telegram|messenger|facebook\\s+messenger|signal|discord|sms|messages)"
+        // Pattern A: "text Alex hey how are you on WhatsApp" or "text Alex on WhatsApp saying hey"
+        val afterPlatformRegex = Regex(
+            "^(?:please\\s+)?(?:text|message|dm|send\\s+(?:a\\s+)?(?:message|text|dm)\\s+to)\\s+(.+?)\\s+(?:on|via|using|in)\\s+$platformPattern(?:\\s+(?:saying|that|with\\s+message|:)\\s+(.+))?$",
+            RegexOption.IGNORE_CASE
+        )
+        afterPlatformRegex.find(trimmed)?.let { m ->
+            val targetAndMaybeMsg = m.groupValues[1].trim()
+            val rawPlatform = m.groupValues[2].trim().lowercase(Locale.US)
+            val trailingMsg = m.groupValues[3].trim().trim('"', '\'')
+            val platform = messagingPlatformNames[rawPlatform] ?: rawPlatform
+            val (contact, msg) = splitContactAndInlineMessage(targetAndMaybeMsg, trailingMsg)
+            if (contact.isNotBlank()) {
+                return ParsedSystemCommand(SystemIntentKind.TEXT_CONTACT, platform, "$contact|$msg")
+            }
+        }
+
+        // Pattern B: "on WhatsApp text Alex saying hey"
+        val leadPlatformRegex = Regex(
+            "^(?:please\\s+)?(?:on|via|in)\\s+$platformPattern\\s+(?:text|message|dm|send\\s+(?:a\\s+)?message\\s+to)\\s+(.+)$",
+            RegexOption.IGNORE_CASE
+        )
+        leadPlatformRegex.find(trimmed)?.let { m ->
+            val rawPlatform = m.groupValues[1].trim().lowercase(Locale.US)
+            val rest = m.groupValues[2].trim()
+            val platform = messagingPlatformNames[rawPlatform] ?: rawPlatform
+            val sayingSplit = rest.split(Regex("\\s+(?:saying|that|:)\\s+", RegexOption.IGNORE_CASE), limit = 2)
+            val contact = sayingSplit[0].trim()
+            val msg = sayingSplit.getOrElse(1) { "" }.trim().trim('"', '\'')
+            if (contact.isNotBlank()) {
+                return ParsedSystemCommand(SystemIntentKind.TEXT_CONTACT, platform, "$contact|$msg")
+            }
+        }
+
+        // Pattern C: "text <Name> saying <Message>" (defaults to Messages/WhatsApp choice in coordinator if ambiguous)
+        val genericContactSaying = Regex(
+            "^(?:please\\s+)?(?:text|message|dm)\\s+([A-Za-z][A-Za-z0-9._' -]{1,35})\\s+(?:saying|that)\\s+(.+)$",
+            RegexOption.IGNORE_CASE
+        )
+        genericContactSaying.find(trimmed)?.let { m ->
+            val contact = m.groupValues[1].trim()
+            val msg = m.groupValues[2].trim().trim('"', '\'')
+            if (contact.isNotBlank() && msg.isNotBlank()) {
+                return ParsedSystemCommand(SystemIntentKind.TEXT_CONTACT, "Messages", "$contact|$msg")
+            }
+        }
+
+        return null
+    }
+
+    private fun splitContactAndInlineMessage(targetAndMaybeMsg: String, trailingMsg: String): Pair<String, String> {
+        if (trailingMsg.isNotBlank()) {
+            return targetAndMaybeMsg.trim().trim('"', '\'') to trailingMsg
+        }
+        val explicitSaying = targetAndMaybeMsg.split(Regex("\\s+(?:saying|that|:)\\s+", RegexOption.IGNORE_CASE), limit = 2)
+        if (explicitSaying.size == 2) {
+            return explicitSaying[0].trim() to explicitSaying[1].trim().trim('"', '\'')
+        }
+        val quoteIdx = targetAndMaybeMsg.indexOfAny(charArrayOf('"', '\''))
+        if (quoteIdx > 0) {
+            return targetAndMaybeMsg.substring(0, quoteIdx).trim() to
+                targetAndMaybeMsg.substring(quoteIdx).trim().trim('"', '\'')
+        }
+        val words = targetAndMaybeMsg.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+        // Heuristic: if 3+ words without separator, first token (or first 2 if single short? use first token when 3+) is contact and remainder is message
+        return if (words.size >= 3) {
+            words.first() to words.drop(1).joinToString(" ")
+        } else {
+            targetAndMaybeMsg.trim() to ""
+        }
+    }
+
+    internal fun parseSocialActionCommand(trimmed: String, lower: String): ParsedSystemCommand? {
+        val detectedPlatform = socialPlatformNames.firstOrNull { p ->
+            Regex("\\b(?:on|in)\\s+$p\\b|\\b$p\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)
+        }.orEmpty()
+
+        val canonicalPlatform = when (detectedPlatform) {
+            "insta", "ig" -> "Instagram"
+            "tik tok" -> "TikTok"
+            "yt" -> "YouTube"
+            "snap" -> "Snapchat"
+            "fb" -> "Facebook"
+            "twitter" -> "X"
+            else -> detectedPlatform.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() }
+        }
+
+        val action = when {
+            Regex("^(?:please\\s+)?(?:like|love|upvote|double[- ]tap\\s+like)(?:\\s+(?:this|the)\\s+(?:post|video|reel|photo|tweet|clip))?(?:\\s+(?:on|in)\\s+.+)?$", RegexOption.IGNORE_CASE).matches(lower) -> "like"
+            Regex("^(?:please\\s+)?(?:repost|retweet|reshare|boost)(?:\\s+(?:this|the)?\\s*(?:post|tweet|video|reel)?)?(?:\\s+(?:on|in)\\s+.+)?$", RegexOption.IGNORE_CASE).matches(lower) -> "repost"
+            Regex("^(?:please\\s+)?(?:share)(?:\\s+(?:this|the)\\s+(?:post|video|reel|tweet|photo))?(?:\\s+(?:on|in)\\s+.+)?$", RegexOption.IGNORE_CASE).matches(lower) -> "share"
+            Regex("^(?:please\\s+)?(?:save|bookmark)(?:\\s+(?:this|the)\\s+(?:post|video|reel|photo))?(?:\\s+(?:on|in)\\s+.+)?$", RegexOption.IGNORE_CASE).matches(lower) -> "save"
+            Regex("^(?:please\\s+)?(?:follow|subscribe)(?:\\s+(?:this\\s+(?:creator|user|channel|page)|them|back))?(?:\\s+(?:on|in)\\s+.+)?$", RegexOption.IGNORE_CASE).matches(lower) -> "follow"
+            Regex("^(?:please\\s+)?(?:open\\s+(?:the\\s+)?comments?|show\\s+comments?|view\\s+comments?)(?:\\s+(?:on|in)\\s+.+)?$", RegexOption.IGNORE_CASE).matches(lower) -> "comment"
+            Regex("^(?:please\\s+)?(?:next\\s+(?:post|video|reel|short|clip|tiktok|snap)|scroll\\s+(?:tiktok|instagram|reels|shorts|x|twitter|reddit|feed|down))?$", RegexOption.IGNORE_CASE).matches(lower) &&
+                (lower.contains("next ") || lower.startsWith("scroll ")) -> "scroll_down"
+            Regex("^(?:please\\s+)?(?:previous\\s+(?:post|video|reel)|scroll\\s+up)$", RegexOption.IGNORE_CASE).matches(lower) -> "scroll_up"
+            Regex("^(?:please\\s+)?(?:open\\s+(?:my\\s+)?(?:dms|direct\\s+messages|inbox))(?:\\s+(?:on|in)\\s+.+)?$", RegexOption.IGNORE_CASE).matches(lower) -> "dms"
+            Regex("^(?:please\\s+)?open\\s+(?:my\\s+)?profile(?:\\s+(?:on|in)\\s+.+)?$", RegexOption.IGNORE_CASE).matches(lower) -> "profile"
+            else -> null
+        } ?: return null
+
+        return ParsedSystemCommand(SystemIntentKind.SOCIAL_ACTION, action, canonicalPlatform)
+    }
+
     fun extractAndStripAiActions(rawReply: String): Pair<String, List<ParsedSystemCommand>> {
         val commands = mutableListOf<ParsedSystemCommand>()
         actionTagRegex.findAll(rawReply).forEach { match ->
@@ -790,6 +990,30 @@ object JarvisSystemAssistant {
                 }
                 "OPEN_SETTINGS" -> commands.add(ParsedSystemCommand(SystemIntentKind.OPEN_SETTINGS, parts.firstOrNull().orEmpty()))
                 "CAMERA" -> commands.add(ParsedSystemCommand(SystemIntentKind.OPEN_CAMERA))
+                "TEXT_CONTACT" -> {
+                    val platform = parts.getOrNull(0)?.takeIf { it.isNotBlank() } ?: "WhatsApp"
+                    val contact = parts.getOrNull(1)?.takeIf { it.isNotBlank() } ?: ""
+                    val msg = parts.getOrElse(2) { "" }
+                    if (contact.isNotBlank()) {
+                        commands.add(ParsedSystemCommand(SystemIntentKind.TEXT_CONTACT, platform, "$contact|$msg"))
+                    }
+                }
+                "SOCIAL_ACTION" -> {
+                    val action = parts.getOrNull(0)?.takeIf { it.isNotBlank() } ?: "like"
+                    val platform = parts.getOrElse(1) { "" }
+                    commands.add(ParsedSystemCommand(SystemIntentKind.SOCIAL_ACTION, action, platform))
+                }
+                "CLICK_INDEX" -> parts.firstOrNull()?.toIntOrNull()?.let { idx ->
+                    commands.add(ParsedSystemCommand(SystemIntentKind.CLICK_NODE_INDEX, idx.toString()))
+                }
+                "SEARCH_IN_APP" -> parts.firstOrNull()?.takeIf { it.isNotBlank() }?.let { q ->
+                    commands.add(ParsedSystemCommand(SystemIntentKind.SEARCH_IN_APP, q))
+                }
+                "STUDY_DEVICE" -> commands.add(ParsedSystemCommand(SystemIntentKind.STUDY_DEVICE))
+                "VERIFY_VOICE" -> commands.add(ParsedSystemCommand(SystemIntentKind.VERIFY_VOICE))
+                "AUTONOMOUS_TASK" -> parts.firstOrNull()?.takeIf { it.isNotBlank() }?.let { goal ->
+                    commands.add(ParsedSystemCommand(SystemIntentKind.AUTONOMOUS_TASK, goal))
+                }
             }
         }
         val cleaned = rawReply.replace(actionTagRegex, "").replace(Regex("\\n{3,}"), "\n\n").trim()
@@ -1045,6 +1269,38 @@ object JarvisSystemAssistant {
                     val forward = !command.primaryArg.equals("up", ignoreCase = true)
                     val outcome = svc.scrollScreen(forward)
                     SystemExecutionResult(true, outcome.message, "Screen Scroll", outcome.success)
+                }
+            }
+            SystemIntentKind.CLICK_NODE_INDEX -> {
+                val svc = JarvisAccessibilityService.activeInstance()
+                val idx = command.primaryArg.toIntOrNull() ?: -1
+                if (svc == null || idx <= 0) {
+                    SystemExecutionResult(true, "Turn on Screen Helper first to click element #$idx, Sir.", "Screen Helper Needed")
+                } else {
+                    val outcome = svc.clickIndexedNode(idx)
+                    SystemExecutionResult(true, outcome.message, "Smart Tap", outcome.success)
+                }
+            }
+            SystemIntentKind.SEARCH_IN_APP -> {
+                val svc = JarvisAccessibilityService.activeInstance()
+                if (svc == null) {
+                    SystemExecutionResult(true, "Turn on Screen Helper first so I can search inside this app, Sir.", "Screen Helper Needed")
+                } else {
+                    val outcome = svc.findAndTapSearchAndType(command.primaryArg)
+                    SystemExecutionResult(true, outcome.message, "In-App Search", outcome.success)
+                }
+            }
+            SystemIntentKind.SOCIAL_ACTION -> {
+                val svc = JarvisAccessibilityService.activeInstance()
+                if (svc == null) {
+                    SystemExecutionResult(
+                        handled = true,
+                        replyText = "Turn on Screen Helper on Home or Settings first, Sir, so I can control social apps for you.",
+                        actionLabel = "Screen Helper Needed"
+                    )
+                } else {
+                    val outcome = svc.performSocialAction(command.primaryArg, command.secondaryArg)
+                    SystemExecutionResult(true, outcome.message, "Social Navigation", outcome.success)
                 }
             }
             SystemIntentKind.GLOBAL_NAV -> {
@@ -1395,6 +1651,14 @@ object JarvisSystemAssistant {
             "language" -> Intent(Settings.ACTION_LOCALE_SETTINGS)
             "developer" -> Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
             "assistant" -> Intent(Settings.ACTION_VOICE_INPUT_SETTINGS)
+            "nfc" -> Intent(Settings.ACTION_NFC_SETTINGS)
+            "cast" -> Intent(Settings.ACTION_CAST_SETTINGS)
+            "vpn" -> Intent(Settings.ACTION_VPN_SETTINGS)
+            "accounts" -> Intent(Settings.ACTION_SYNC_SETTINGS)
+            "keyboard" -> Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)
+            "about", "about phone" -> Intent(Settings.ACTION_DEVICE_INFO_SETTINGS)
+            "hotspot", "tethering" -> Intent(Settings.ACTION_WIRELESS_SETTINGS)
+            "dark theme", "night display" -> Intent(Settings.ACTION_DISPLAY_SETTINGS)
             else -> Intent(Settings.ACTION_SETTINGS)
         }
         return launchIntent(

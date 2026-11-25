@@ -81,7 +81,8 @@ fun HomeDashboardScreen(
     onLaunchFloatingOrbNow: () -> Unit,
     onQuickVoicePrompt: (String) -> Unit,
     onOpenWebsite: (String) -> Unit,
-    onNavigate: (JarvisSection) -> Unit
+    onNavigate: (JarvisSection) -> Unit,
+    onAbortAutonomous: () -> Unit
 ) {
     val jc = LocalJarvisColors.current
     var showScreenHelperDisclosure by remember { mutableStateOf(false) }
@@ -147,6 +148,54 @@ fun HomeDashboardScreen(
                                 contentDescription = "Open settings",
                                 tint = ElectricBlue
                             )
+                        }
+                    }
+                }
+            }
+
+            // Futuristic Holographic Telemetry Strip
+            if (settings.futuristicHudMode) {
+                item {
+                    HudGlassCard(borderColor = ArcCyan.copy(alpha = 0.36f)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "SYSTEM HUD • UNDER YOUR COMMAND",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = ArcCyan
+                                )
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    text = "${uiState.learnedAppsCount} apps learned • ${uiState.learnedWorkflowsCount} workflows • ${if (uiState.voiceEnrolled) "Voice ID Locked" else "Voice ID Open"}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = jc.mutedSlate
+                                )
+                                if (uiState.autonomousStepStatus.isNotBlank()) {
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        text = uiState.autonomousStepStatus,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = ProfitEmerald
+                                    )
+                                }
+                            }
+                            if (uiState.autonomousStepStatus.isNotBlank() || uiState.pendingConfirmationSummary != null) {
+                                OutlinedButton(
+                                    onClick = onAbortAutonomous,
+                                    modifier = Modifier.testTag("home_abort_autonomous_btn")
+                                ) {
+                                    Text("Abort")
+                                }
+                            } else {
+                                StatusBadge(
+                                    text = if (settings.showTapIndicator || settings.showHighlightIndicator) "HUD ON" else "QUIET",
+                                    color = if (settings.showTapIndicator || settings.showHighlightIndicator) ProfitEmerald else ElectricBlue
+                                )
+                            }
                         }
                     }
                 }
@@ -304,13 +353,16 @@ fun HomeDashboardScreen(
                     )
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         val quickPrompts = listOf(
-                            "Open YouTube in Chrome",
-                            "Search online for gold market trend",
+                            "Text Alex hey how are you on WhatsApp",
+                            "Like this post",
+                            "Scroll TikTok",
+                            "Study my device",
+                            "Check my voice",
+                            "Daily briefing",
                             "Guide me on this screen",
-                            "Fill my login credentials",
+                            "Open YouTube in Chrome",
                             "Search Reddit for AI news",
-                            "Open Wi-Fi settings",
-                            "Set a timer for 5 minutes"
+                            "Open Wi-Fi settings"
                         )
                         items(quickPrompts) { prompt ->
                             AssistChip(

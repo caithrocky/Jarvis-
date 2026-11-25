@@ -3,6 +3,7 @@ package com.example
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
+import com.example.assistant.DeviceLearningEngine
 import com.example.assistant.JarvisCommandCoordinator
 import com.example.data.local.JarvisDatabase
 import com.example.data.local.JarvisLocalRepository
@@ -14,6 +15,10 @@ import com.example.security.SecretsConfig
 import com.example.security.SecureCredentialStore
 import com.example.voice.JarvisNotificationHelper
 import com.example.voice.JarvisVoiceEngine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
@@ -37,9 +42,12 @@ class JarvisApplication : Application() {
         private set
     lateinit var voiceEngine: JarvisVoiceEngine
         private set
+    lateinit var deviceLearningEngine: DeviceLearningEngine
+        private set
     lateinit var commandCoordinator: JarvisCommandCoordinator
         private set
 
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var startedActivityCount = 0
 
     override fun onCreate() {
@@ -60,17 +68,25 @@ class JarvisApplication : Application() {
         webClient = WebKnowledgeClient(httpClient)
         nimClient = NvidiaNimClient(httpClient)
         magpieTtsClient = NvidiaMagpieTtsClient(httpClient)
-        voiceEngine = JarvisVoiceEngine(this, magpieTtsClient)
+        voiceEngine = JarvisVoiceEngine(this, magpieTtsClient, credentialStore)
+        deviceLearningEngine = DeviceLearningEngine(this, localRepository, preferencesRepository)
 
         commandCoordinator = JarvisCommandCoordinator(
             context = this,
             localRepo = localRepository,
             prefsRepo = preferencesRepository,
+            credentialStore = credentialStore,
             webClient = webClient,
             nimClient = nimClient,
-            voiceEngine = voiceEngine
+            voiceEngine = voiceEngine,
+            deviceLearningEngine = deviceLearningEngine
         )
         commandCoordinator.attachVoiceEngineCallbacks()
+
+        DeviceLearningEngine.scheduleDailyStudy(this)
+        appScope.launch {
+            deviceLearningEngine.studyIfDailyDue()
+        }
 
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityStarted(activity: Activity) {

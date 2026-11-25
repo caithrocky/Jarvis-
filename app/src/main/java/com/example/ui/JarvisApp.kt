@@ -259,7 +259,8 @@ fun JarvisApp(viewModel: JarvisViewModel) {
                                         viewModel.sendUserQuery(prompt, fromVoice = false)
                                     },
                                     onOpenWebsite = viewModel::openWebsiteInChrome,
-                                    onNavigate = viewModel::navigateTo
+                                    onNavigate = viewModel::navigateTo,
+                                    onAbortAutonomous = viewModel::abortAutonomousTasks
                                 )
 
                                 JarvisSection.JARVIS -> JarvisChatScreen(
@@ -316,7 +317,18 @@ fun JarvisApp(viewModel: JarvisViewModel) {
                                     onTestNvidiaConnection = viewModel::testNvidiaNimConnection,
                                     onTriggerManualUpdateCheck = viewModel::triggerManualUpdateCheck,
                                     onSaveNvidiaKeyOverride = viewModel::saveNvidiaNimKeyOverride,
-                                    onClearNvidiaKeyOverride = viewModel::clearNvidiaNimKeyOverride
+                                    onClearNvidiaKeyOverride = viewModel::clearNvidiaNimKeyOverride,
+                                    onToggleShowTapIndicator = viewModel::setShowTapIndicator,
+                                    onToggleShowHighlightIndicator = viewModel::setShowHighlightIndicator,
+                                    onToggleShowScrollIndicator = viewModel::setShowScrollIndicator,
+                                    onToggleFuturisticHudMode = viewModel::setFuturisticHudMode,
+                                    onToggleVoiceBiometricLock = viewModel::setVoiceBiometricLockEnabled,
+                                    onToggleVoiceFluAdaptation = viewModel::setVoiceFluAdaptationEnabled,
+                                    onEnrollOwnerVoice = viewModel::enrollOwnerVoice,
+                                    onVerifyOwnerVoice = viewModel::verifyOwnerVoiceNow,
+                                    onClearOwnerVoice = viewModel::clearOwnerVoice,
+                                    onToggleAutoLearnDaily = viewModel::setAutoLearnDeviceDaily,
+                                    onStudyDeviceNow = viewModel::studyDeviceNow
                                 )
                             }
                         }

@@ -58,12 +58,16 @@ class JarvisFloatingOrbService : Service() {
     private var orbView: GlowingMiniOrbView? = null
     private var bubbleCard: LinearLayout? = null
     private var statusTitleView: TextView? = null
+    private var speakerPillView: TextView? = null
     private var replyBodyView: TextView? = null
     private var micActionBtn: Button? = null
+    private var inputRowView: LinearLayout? = null
+    private var typeToggleBtn: Button? = null
     private var quickInput: EditText? = null
     private var layoutParams: WindowManager.LayoutParams? = null
 
     private var isExpanded = false
+    private var isTypingVisible = false
 
     override fun onCreate() {
         super.onCreate()
@@ -88,7 +92,7 @@ class JarvisFloatingOrbService : Service() {
         if (intent?.getBooleanExtra(EXTRA_START_LISTEN, false) == true) {
             val app = application as JarvisApplication
             if (app.voiceEngine.hasMicPermission()) {
-                app.voiceEngine.startSingleCommandCapture()
+                app.voiceEngine.startSingleCommandCapture(keepConversationLoop = true)
             }
         }
         return START_STICKY
@@ -131,7 +135,7 @@ class JarvisFloatingOrbService : Service() {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = dp(18)
-            y = dp(150)
+            y = dp(140)
         }
         layoutParams = params
 
@@ -143,10 +147,11 @@ class JarvisFloatingOrbService : Service() {
         val orbSize = dp(66)
         val orb = GlowingMiniOrbView(this).apply {
             layoutParams = LinearLayout.LayoutParams(orbSize, orbSize)
-            alpha = 0.90f
+            alpha = 0.92f
+            contentDescription = "JARVIS Floating Voice Orb"
         }
 
-        // Drag + tap gesture handler on the glowing orb
+        // Drag + voice-first tap gesture handler on the glowing orb
         var initialX = 0
         var initialY = 0
         var touchStartX = 0f
@@ -176,8 +181,11 @@ class JarvisFloatingOrbService : Service() {
                 MotionEvent.ACTION_UP -> {
                     if (!moved) {
                         setExpanded(!isExpanded)
-                        if (isExpanded && app.voiceEngine.phase.value == VoicePipelinePhase.STOPPED && app.voiceEngine.hasMicPermission()) {
-                            app.voiceEngine.startSingleCommandCapture()
+                        if (isExpanded &&
+                            app.voiceEngine.phase.value != VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE &&
+                            app.voiceEngine.hasMicPermission()
+                        ) {
+                            app.voiceEngine.startSingleCommandCapture(keepConversationLoop = true)
                         }
                     }
                     true
@@ -186,17 +194,17 @@ class JarvisFloatingOrbService : Service() {
             }
         }
 
-        // Translucent frosted mini HUD panel
+        // Translucent frosted voice-first mini HUD panel
         val cardBg = GradientDrawable().apply {
-            setColor(Color.argb(226, 10, 17, 34))
+            setColor(Color.argb(230, 8, 15, 32))
             cornerRadius = dp(18).toFloat()
-            setStroke(dp(1), Color.argb(135, 0, 229, 255))
+            setStroke(dp(1), Color.argb(150, 0, 229, 255))
         }
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = cardBg
             setPadding(dp(12), dp(10), dp(12), dp(10))
-            layoutParams = LinearLayout.LayoutParams(dp(292), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(304), LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                 topMargin = dp(6)
             }
             visibility = View.GONE
@@ -208,7 +216,7 @@ class JarvisFloatingOrbService : Service() {
             gravity = Gravity.CENTER_VERTICAL
         }
         val titleTv = TextView(this).apply {
-            text = "JARVIS • Ready"
+            text = "JARVIS • Listening"
             setTextColor(Color.rgb(0, 229, 255))
             textSize = 13f
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -228,58 +236,93 @@ class JarvisFloatingOrbService : Service() {
         headerRow.addView(openAppBtn)
         headerRow.addView(closeOrbBtn)
 
-        // Transcript / Response area
+        // Speaker biometric & autonomous telemetry pill
+        val speakerTv = TextView(this).apply {
+            text = "Voice-First • Hands-Free"
+            setTextColor(Color.rgb(125, 211, 252))
+            textSize = 11f
+            setPadding(dp(2), dp(3), dp(2), dp(2))
+        }
+
+        // Transcript / Spoken response area
         val scroll = ScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(96)
+                dp(94)
             ).apply {
-                topMargin = dp(6)
+                topMargin = dp(4)
                 bottomMargin = dp(6)
             }
         }
         val bodyTv = TextView(this).apply {
-            text = "Say a command, ask to write in an app, or tap Speak."
+            text = "Listening for you, Sir — speak naturally anytime."
             setTextColor(Color.rgb(235, 243, 255))
             textSize = 13f
         }
         scroll.addView(bodyTv)
 
-        // Quick action row (Speak/Stop, Step Guide, Fill Credentials, Back, Mini)
-        val actionsRow = LinearLayout(this).apply {
+        // Row 1: Voice control + emergency Abort + universal social Like + screen Guide
+        val actionsRowPrimary = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        val speakBtn = createMiniButton("Speak") {
-            if (app.voiceEngine.phase.value == VoicePipelinePhase.SPEAKING_RESPONSE) {
-                app.voiceEngine.interruptSpeech()
-            } else if (app.voiceEngine.hasMicPermission()) {
-                app.voiceEngine.startSingleCommandCapture()
+        val speakBtn = createMiniButton("Listen") {
+            when (app.voiceEngine.phase.value) {
+                VoicePipelinePhase.SPEAKING_RESPONSE -> app.voiceEngine.interruptSpeech()
+                VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE -> {
+                    app.voiceEngine.startAlwaysOnWakeWordLoop()
+                }
+                else -> {
+                    if (app.voiceEngine.hasMicPermission()) {
+                        app.voiceEngine.startSingleCommandCapture(keepConversationLoop = true)
+                    }
+                }
             }
+        }
+        val abortBtn = createMiniButton("Abort", bgColor = Color.argb(205, 190, 38, 56)) {
+            app.commandCoordinator.abortAllPendingActions()
+        }
+        val likeBtn = createMiniButton("Like") {
+            app.commandCoordinator.submitQuery("Like this post", fromVoice = false)
         }
         val guideBtn = createMiniButton("Guide") {
             app.commandCoordinator.submitQuery("Guide me on this screen", fromVoice = false)
         }
-        val fillBtn = createMiniButton("Fill Login") {
-            app.commandCoordinator.submitQuery("Fill my credentials", fromVoice = false)
+        actionsRowPrimary.addView(speakBtn)
+        actionsRowPrimary.addView(abortBtn)
+        actionsRowPrimary.addView(likeBtn)
+        actionsRowPrimary.addView(guideBtn)
+
+        // Row 2: Back + tucked-away Type toggle + Minimize
+        val actionsRowSecondary = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(5)
+            }
         }
         val backBtn = createMiniButton("Back") {
             JarvisAccessibilityService.activeInstance()?.performGlobalNavigation("back")
                 ?: app.commandCoordinator.submitQuery("Go back", fromVoice = false)
         }
+        val typeToggle = createMiniButton("Type") {
+            setTypingRowVisible(!isTypingVisible)
+        }
         val minBtn = createMiniButton("Mini") {
             setExpanded(false)
         }
-        actionsRow.addView(speakBtn)
-        actionsRow.addView(guideBtn)
-        actionsRow.addView(fillBtn)
-        actionsRow.addView(backBtn)
-        actionsRow.addView(minBtn)
+        actionsRowSecondary.addView(backBtn)
+        actionsRowSecondary.addView(typeToggle)
+        actionsRowSecondary.addView(minBtn)
 
-        // Text input bar (switches overlay focusability on tap)
+        // Optional tucked-away text input bar (hidden by default so Orb stays voice-first)
         val inputRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -288,7 +331,7 @@ class JarvisFloatingOrbService : Service() {
             }
         }
         val editText = EditText(this).apply {
-            hint = "Ask or tell JARVIS to type..."
+            hint = "Optional text command..."
             setHintTextColor(Color.argb(150, 175, 198, 224))
             setTextColor(Color.WHITE)
             textSize = 13f
@@ -297,9 +340,9 @@ class JarvisFloatingOrbService : Service() {
             setSingleLine(true)
             setPadding(dp(10), dp(6), dp(10), dp(6))
             background = GradientDrawable().apply {
-                setColor(Color.argb(160, 20, 32, 60))
+                setColor(Color.argb(165, 20, 32, 60))
                 cornerRadius = dp(10).toFloat()
-                setStroke(dp(1), Color.argb(90, 56, 189, 248))
+                setStroke(dp(1), Color.argb(95, 56, 189, 248))
             }
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             setOnTouchListener { _, _ ->
@@ -311,7 +354,7 @@ class JarvisFloatingOrbService : Service() {
             val txt = editText.text?.toString()?.trim().orEmpty()
             if (txt.isNotBlank()) {
                 editText.setText("")
-                enableKeyboardFocus(false)
+                setTypingRowVisible(false)
                 app.commandCoordinator.submitQuery(txt, fromVoice = false)
             }
         }
@@ -326,8 +369,10 @@ class JarvisFloatingOrbService : Service() {
         inputRow.addView(sendBtn)
 
         card.addView(headerRow)
+        card.addView(speakerTv)
         card.addView(scroll)
-        card.addView(actionsRow)
+        card.addView(actionsRowPrimary)
+        card.addView(actionsRowSecondary)
         card.addView(inputRow)
 
         container.addView(orb)
@@ -337,56 +382,110 @@ class JarvisFloatingOrbService : Service() {
         orbView = orb
         bubbleCard = card
         statusTitleView = titleTv
+        speakerPillView = speakerTv
         replyBodyView = bodyTv
         micActionBtn = speakBtn
+        inputRowView = inputRow
+        typeToggleBtn = typeToggle
         quickInput = editText
 
         windowManager.addView(container, params)
         orb.startAnim()
 
-        // Observe live voice, processing, and assistant reply state
+        // Observe live voice, speaker verification, autonomous progress, and assistant reply state
         serviceScope.launch {
-            val voiceTriple = combine(
+            val voiceBundle = combine(
                 app.voiceEngine.phase,
                 app.voiceEngine.rmsLevel,
-                app.voiceEngine.partialTranscript
-            ) { phase, rms, partial -> Triple(phase, rms, partial) }
+                app.voiceEngine.partialTranscript,
+                app.voiceEngine.lastSpeakerState,
+                app.voiceEngine.speakerConfidence
+            ) { phase, rms, partial, speakerState, speakerConf ->
+                VoiceSnapshot(phase, rms, partial, speakerState, speakerConf)
+            }
 
-            val replyTriple = combine(
+            val coordinatorBundle = combine(
                 app.commandCoordinator.isProcessing,
                 app.commandCoordinator.streamingReply,
-                app.commandCoordinator.lastAssistantReply
-            ) { processing, streaming, lastReply -> Triple(processing, streaming, lastReply) }
+                app.commandCoordinator.lastAssistantReply,
+                app.commandCoordinator.autonomousStepStatus,
+                app.commandCoordinator.pendingConfirmationSummary
+            ) { processing, streaming, lastReply, stepStatus, pendingConfirm ->
+                CoordinatorSnapshot(processing, streaming, lastReply, stepStatus, pendingConfirm)
+            }
 
-            combine(voiceTriple, replyTriple) { v, r ->
-                OverlayStateSnapshot(
-                    phase = v.first,
-                    rms = v.second,
-                    partial = v.third,
-                    processing = r.first,
-                    streaming = r.second,
-                    lastReply = r.third
-                )
+            combine(voiceBundle, coordinatorBundle) { v, c ->
+                OverlayStateSnapshot(v, c)
             }.collectLatest { snap ->
-                orb.updateVoiceVisuals(snap.phase, snap.rms, snap.processing)
+                val v = snap.voice
+                val c = snap.coordinator
+                orb.updateVoiceVisuals(v.phase, v.rms, c.processing)
                 titleTv.text = when {
-                    snap.processing -> "JARVIS • Thinking..."
-                    snap.phase == VoicePipelinePhase.SPEAKING_RESPONSE -> "JARVIS • Speaking"
-                    snap.phase == VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE -> "JARVIS • Listening..."
-                    snap.phase == VoicePipelinePhase.WAKE_WORD_STANDBY -> "JARVIS • \"Hey JARVIS\""
-                    else -> "JARVIS • Mini Orb"
+                    c.autonomousStepStatus.isNotBlank() -> "JARVIS • Acting On Screen"
+                    c.processing -> "JARVIS • Thinking..."
+                    v.phase == VoicePipelinePhase.SPEAKING_RESPONSE -> "JARVIS • Speaking"
+                    v.phase == VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE -> "JARVIS • Listening..."
+                    v.phase == VoicePipelinePhase.WAKE_WORD_STANDBY -> "JARVIS • \"Hey JARVIS\""
+                    else -> "JARVIS • Voice Orb"
                 }
-                speakBtn.text = if (snap.phase == VoicePipelinePhase.SPEAKING_RESPONSE) "Stop" else "Speak"
+
+                val confPct = (v.speakerConfidence * 100f).toInt().coerceIn(0, 100)
+                speakerTv.text = when {
+                    !c.pendingConfirmationSummary.isNullOrBlank() ->
+                        "Confirm required: ${c.pendingConfirmationSummary}"
+                    c.autonomousStepStatus.isNotBlank() ->
+                        c.autonomousStepStatus
+                    v.speakerState == SpeakerMatchState.VERIFIED_OWNER ->
+                        "Owner Verified ($confPct%) • Voice-First"
+                    v.speakerState == SpeakerMatchState.VERIFIED_VOCAL_SHIFT ->
+                        "Vocal Shift Adapted ($confPct%) • Verified Sir"
+                    v.speakerState == SpeakerMatchState.UNRECOGNIZED_SPEAKER ->
+                        "Unrecognized Speaker ($confPct%) • Locked"
+                    else ->
+                        "Voice-First • Say a command anytime"
+                }
+                speakerTv.setTextColor(
+                    when {
+                        !c.pendingConfirmationSummary.isNullOrBlank() -> Color.rgb(251, 191, 36)
+                        v.speakerState == SpeakerMatchState.UNRECOGNIZED_SPEAKER -> Color.rgb(248, 113, 113)
+                        v.speakerState == SpeakerMatchState.VERIFIED_OWNER ||
+                            v.speakerState == SpeakerMatchState.VERIFIED_VOCAL_SHIFT -> Color.rgb(52, 211, 153)
+                        else -> Color.rgb(125, 211, 252)
+                    }
+                )
+
+                speakBtn.text = when (v.phase) {
+                    VoicePipelinePhase.SPEAKING_RESPONSE -> "Mute"
+                    VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE -> "Pause"
+                    else -> "Listen"
+                }
+
                 bodyTv.text = when {
-                    snap.partial.isNotBlank() -> "\"${snap.partial}\""
-                    snap.processing && snap.streaming.isNotBlank() -> snap.streaming
-                    else -> snap.lastReply
+                    v.partial.isNotBlank() -> "\"${v.partial}\""
+                    c.processing && c.streaming.isNotBlank() -> c.streaming
+                    else -> c.lastReply
                 }
             }
         }
     }
 
-    private fun createMiniButton(label: String, onClick: () -> Unit): Button {
+    private fun setTypingRowVisible(visible: Boolean) {
+        isTypingVisible = visible
+        inputRowView?.visibility = if (visible) View.VISIBLE else View.GONE
+        typeToggleBtn?.text = if (visible) "Voice" else "Type"
+        if (visible) {
+            enableKeyboardFocus(true)
+            quickInput?.requestFocus()
+        } else {
+            enableKeyboardFocus(false)
+        }
+    }
+
+    private fun createMiniButton(
+        label: String,
+        bgColor: Int = Color.argb(190, 26, 95, 195),
+        onClick: () -> Unit
+    ): Button {
         return Button(this).apply {
             text = label
             isAllCaps = false
@@ -398,7 +497,7 @@ class JarvisFloatingOrbService : Service() {
             minWidth = dp(44)
             minimumWidth = dp(44)
             background = GradientDrawable().apply {
-                setColor(Color.argb(190, 26, 95, 195))
+                setColor(bgColor)
                 cornerRadius = dp(10).toFloat()
             }
             layoutParams = LinearLayout.LayoutParams(
@@ -415,7 +514,7 @@ class JarvisFloatingOrbService : Service() {
         isExpanded = expand
         bubbleCard?.visibility = if (expand) View.VISIBLE else View.GONE
         if (!expand) {
-            enableKeyboardFocus(false)
+            setTypingRowVisible(false)
         }
     }
 
@@ -430,13 +529,25 @@ class JarvisFloatingOrbService : Service() {
         runCatching { windowManager.updateViewLayout(container, params) }
     }
 
-    private data class OverlayStateSnapshot(
+    private data class VoiceSnapshot(
         val phase: VoicePipelinePhase,
         val rms: Float,
         val partial: String,
+        val speakerState: SpeakerMatchState?,
+        val speakerConfidence: Float
+    )
+
+    private data class CoordinatorSnapshot(
         val processing: Boolean,
         val streaming: String,
-        val lastReply: String
+        val lastReply: String,
+        val autonomousStepStatus: String,
+        val pendingConfirmationSummary: String?
+    )
+
+    private data class OverlayStateSnapshot(
+        val voice: VoiceSnapshot,
+        val coordinator: CoordinatorSnapshot
     )
 
     private class GlowingMiniOrbView(context: Context) : View(context) {

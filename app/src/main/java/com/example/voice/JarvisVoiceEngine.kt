@@ -9,7 +9,9 @@ import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioRecord
 import android.media.AudioTrack
+import android.media.MediaRecorder
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -25,6 +27,7 @@ import com.example.data.remote.SynthesizedAudio
 import com.example.domain.model.OrbState
 import com.example.domain.model.VoicePersonality
 import com.example.security.SecretsConfig
+import com.example.security.SecureCredentialStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -35,6 +38,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Locale
@@ -51,7 +55,8 @@ enum class VoicePipelinePhase {
 
 class JarvisVoiceEngine(
     private val context: Context,
-    private val magpieTtsClient: NvidiaMagpieTtsClient? = null
+    private val magpieTtsClient: NvidiaMagpieTtsClient? = null,
+    private val credentialStore: SecureCredentialStore? = null
 ) {
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -107,9 +112,60 @@ class JarvisVoiceEngine(
     private val _statusDetail = MutableStateFlow("Tap the orb to speak or say \"Hey JARVIS\"")
     val statusDetail: StateFlow<String> = _statusDetail.asStateFlow()
 
+    @Volatile
+    private var fluToleranceEnabled = true
+    @Volatile
+    private var lastVerifiedOwnerAtMs = 0L
+
+    private val _lastSpeakerState = MutableStateFlow<SpeakerMatchState?>(null)
+    val lastSpeakerState: StateFlow<SpeakerMatchState?> = _lastSpeakerState.asStateFlow()
+
+    private val _speakerConfidence = MutableStateFlow(0f)
+    val speakerConfidence: StateFlow<Float> = _speakerConfidence.asStateFlow()
+
+    private val _speakerStatusSummary = MutableStateFlow("Owner Voice ID: Not enrolled")
+    val speakerStatusSummary: StateFlow<String> = _speakerStatusSummary.asStateFlow()
+
     init {
         initTts()
         refreshBluetoothState()
+        refreshSpeakerEnrollmentLabel()
+    }
+
+    fun refreshSpeakerEnrollmentLabel() {
+        val profile = credentialStore?.getOwnerVoiceProfile()
+        _speakerStatusSummary.value = when {
+            profile == null -> "Owner Voice ID: Not enrolled"
+            profile.fluAdaptedCount > 0 ->
+                "Enrolled (${profile.sampleCount} samples • ${profile.fluAdaptedCount} flu shifts learned)"
+            else ->
+                "Enrolled (${profile.sampleCount} samples • Baseline ${profile.baselinePitchHz.toInt()}Hz)"
+        }
+    }
+
+    fun isOwnerVoiceEnrolled(): Boolean = credentialStore?.getOwnerVoiceProfile() != null
+
+    fun isOwnerRecentlyVerified(maxAgeMs: Long = 180_000L): Boolean {
+        if (!isOwnerVoiceEnrolled()) return true
+        return System.currentTimeMillis() - lastVerifiedOwnerAtMs <= maxAgeMs
+    }
+
+    fun markOwnerVerifiedManually() {
+        lastVerifiedOwnerAtMs = System.currentTimeMillis()
+        _lastSpeakerState.value = SpeakerMatchState.VERIFIED_OWNER
+        _speakerConfidence.value = 0.99f
+    }
+
+    fun clearOwnerVoiceProfile() {
+        credentialStore?.clearOwnerVoiceProfile()
+        lastVerifiedOwnerAtMs = 0L
+        _lastSpeakerState.value = null
+        _speakerConfidence.value = 0f
+        refreshSpeakerEnrollmentLabel()
+    }
+
+    fun setFluToleranceEnabled(enabled: Boolean) {
+        fluToleranceEnabled = enabled
     }
 
     fun setCallbacks(
@@ -167,16 +223,191 @@ class JarvisVoiceEngine(
         mainHandler.post { startRecognizerSession() }
     }
 
-    fun startSingleCommandCapture() {
+    fun startSingleCommandCapture(keepConversationLoop: Boolean = true) {
         if (!hasMicPermission()) {
             _statusDetail.value = "Microphone permission required"
             return
         }
         interruptSpeech()
-        continuousSession = true
+        continuousSession = keepConversationLoop
         _phase.value = VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
         _statusDetail.value = "Listening, Sir..."
         mainHandler.post { startRecognizerSession() }
+    }
+
+    suspend fun enrollOwnerVoiceProfile(
+        onPromptStep: (step: Int, phrase: String) -> Unit
+    ): Result<SecureCredentialStore.OwnerVoiceProfile> = withContext(Dispatchers.IO) {
+        if (!hasMicPermission()) {
+            return@withContext Result.failure(IllegalStateException("Microphone permission required"))
+        }
+        val store = credentialStore
+            ?: return@withContext Result.failure(IllegalStateException("Secure credential vault unavailable"))
+
+        val phrases = listOf(
+            "Hey JARVIS, recognize my voice under any condition.",
+            "Open my screen controls and check today's schedule, Sir.",
+            "Confirm owner identity lock and adapt smoothly to my voice."
+        )
+
+        val wasAlwaysOn = alwaysOnEnabled
+        withContext(Dispatchers.Main) {
+            stopAllListening()
+            interruptSpeech()
+        }
+        Thread.sleep(220L)
+
+        val captured = mutableListOf<VoiceSampleFeatures>()
+        for ((index, phrase) in phrases.withIndex()) {
+            withContext(Dispatchers.Main) {
+                _statusDetail.value = "Voice ID sample ${index + 1}/3 — speak clearly..."
+                onPromptStep(index + 1, phrase)
+            }
+            val features = capturePcmFeaturesBlocking(durationMs = 2400L)
+            if (features != null) {
+                captured.add(features)
+            }
+        }
+
+        val profile = VoiceBiometricAnalyzer.buildInitialProfile(captured)
+        return@withContext if (profile != null && captured.size >= 2) {
+            store.saveOwnerVoiceProfile(profile)
+            lastVerifiedOwnerAtMs = System.currentTimeMillis()
+            _lastSpeakerState.value = SpeakerMatchState.VERIFIED_OWNER
+            _speakerConfidence.value = 0.96f
+            refreshSpeakerEnrollmentLabel()
+            if (wasAlwaysOn) {
+                withContext(Dispatchers.Main) { startAlwaysOnWakeWordLoop() }
+            }
+            Result.success(profile)
+        } else {
+            if (wasAlwaysOn) {
+                withContext(Dispatchers.Main) { startAlwaysOnWakeWordLoop() }
+            }
+            Result.failure(IllegalStateException("Not enough clear speech captured (${captured.size}/3). Speak clearly in a quiet space and try again, Sir."))
+        }
+    }
+
+    suspend fun verifyOwnerVoiceBurst(
+        durationMs: Long = 2000L
+    ): SpeakerVerificationResult = withContext(Dispatchers.IO) {
+        val store = credentialStore
+        val profile = store?.getOwnerVoiceProfile()
+            ?: return@withContext SpeakerVerificationResult(
+                state = SpeakerMatchState.VERIFIED_OWNER,
+                confidence = 1f,
+                formantSimilarity = 1f,
+                pitchDeviationRatio = 0f,
+                detailMessage = "No Voice ID enrolled yet — proceeding for Sir."
+            )
+        if (!hasMicPermission()) {
+            return@withContext SpeakerVerificationResult(
+                state = SpeakerMatchState.INSUFFICIENT_AUDIO,
+                confidence = 0f,
+                formantSimilarity = 0f,
+                pitchDeviationRatio = 1f,
+                detailMessage = "Microphone permission needed for Voice ID check, Sir."
+            )
+        }
+
+        val resumeStandby = alwaysOnEnabled
+        withContext(Dispatchers.Main) {
+            pendingListenRunnable?.let { mainHandler.removeCallbacks(it) }
+            runCatching { speechRecognizer?.cancel() }
+            runCatching { speechRecognizer?.destroy() }
+            speechRecognizer = null
+            _statusDetail.value = "Verifying Sir's voiceprint..."
+        }
+        Thread.sleep(180L)
+
+        val features = capturePcmFeaturesBlocking(durationMs)
+        val result = VoiceBiometricAnalyzer.verifySpeaker(
+            sample = features,
+            profile = profile,
+            fluToleranceEnabled = fluToleranceEnabled
+        )
+
+        if (features != null && (result.state == SpeakerMatchState.VERIFIED_OWNER || result.state == SpeakerMatchState.VERIFIED_VOCAL_SHIFT)) {
+            val adapted = VoiceBiometricAnalyzer.adaptProfile(profile, features, result.state)
+            store.saveOwnerVoiceProfile(adapted)
+            lastVerifiedOwnerAtMs = System.currentTimeMillis()
+            refreshSpeakerEnrollmentLabel()
+        }
+
+        _lastSpeakerState.value = result.state
+        _speakerConfidence.value = result.confidence
+        _statusDetail.value = result.detailMessage
+
+        if (resumeStandby) {
+            withContext(Dispatchers.Main) {
+                _phase.value = VoicePipelinePhase.WAKE_WORD_STANDBY
+                scheduleNextListen(260L)
+            }
+        } else {
+            withContext(Dispatchers.Main) {
+                if (_phase.value == VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE) {
+                    scheduleNextListen(220L)
+                }
+            }
+        }
+        result
+    }
+
+    private fun capturePcmFeaturesBlocking(durationMs: Long): VoiceSampleFeatures? {
+        val sampleRate = VoiceBiometricAnalyzer.SAMPLE_RATE_HZ
+        val minBuf = AudioRecord.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        ).coerceAtLeast(4096)
+
+        val targetSamples = ((sampleRate * durationMs) / 1000L).toInt().coerceAtLeast(sampleRate)
+        val pcmBuffer = ShortArray(targetSamples)
+
+        val recorder = runCatching {
+            AudioRecord(
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                minBuf * 2
+            )
+        }.getOrNull() ?: return null
+
+        if (recorder.state != AudioRecord.STATE_INITIALIZED) {
+            runCatching { recorder.release() }
+            return null
+        }
+
+        return try {
+            recorder.startRecording()
+            var offset = 0
+            val chunk = ShortArray(1024)
+            val deadline = System.currentTimeMillis() + durationMs + 500L
+            while (offset < targetSamples && System.currentTimeMillis() < deadline) {
+                val read = recorder.read(chunk, 0, minOf(chunk.size, targetSamples - offset))
+                if (read > 0) {
+                    chunk.copyInto(pcmBuffer, offset, 0, read)
+                    var sumSq = 0.0
+                    for (i in 0 until read) {
+                        val s = chunk[i] / 32768.0
+                        sumSq += s * s
+                    }
+                    _rmsLevel.value = (sqrt(sumSq / read).toFloat() * 4.2f).coerceIn(0.05f, 1.0f)
+                    offset += read
+                } else {
+                    break
+                }
+            }
+            _rmsLevel.value = 0f
+            val actual = if (offset < targetSamples) pcmBuffer.copyOf(offset) else pcmBuffer
+            VoiceBiometricAnalyzer.extractFeatures(actual, sampleRate)
+        } catch (_: Throwable) {
+            null
+        } finally {
+            runCatching { recorder.stop() }
+            runCatching { recorder.release() }
+        }
     }
 
     fun stopAllListening() {

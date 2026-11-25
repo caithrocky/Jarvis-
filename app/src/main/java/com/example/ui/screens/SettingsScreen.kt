@@ -73,7 +73,18 @@ fun SettingsScreen(
     onTestNvidiaConnection: () -> Unit,
     onTriggerManualUpdateCheck: () -> Unit,
     onSaveNvidiaKeyOverride: (String) -> Unit,
-    onClearNvidiaKeyOverride: () -> Unit
+    onClearNvidiaKeyOverride: () -> Unit,
+    onToggleShowTapIndicator: (Boolean) -> Unit,
+    onToggleShowHighlightIndicator: (Boolean) -> Unit,
+    onToggleShowScrollIndicator: (Boolean) -> Unit,
+    onToggleFuturisticHudMode: (Boolean) -> Unit,
+    onToggleVoiceBiometricLock: (Boolean) -> Unit,
+    onToggleVoiceFluAdaptation: (Boolean) -> Unit,
+    onEnrollOwnerVoice: () -> Unit,
+    onVerifyOwnerVoice: () -> Unit,
+    onClearOwnerVoice: () -> Unit,
+    onToggleAutoLearnDaily: (Boolean) -> Unit,
+    onStudyDeviceNow: () -> Unit
 ) {
     val context = LocalContext.current
     val jc = LocalJarvisColors.current
@@ -342,6 +353,163 @@ fun SettingsScreen(
             }
         }
 
+        // Owner Voiceprint & Flu Adaptation ("Under Me")
+        item {
+            HudGlassCard(borderColor = ElectricBlue.copy(alpha = 0.35f)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("OWNER VOICE ID & FLU ADAPTATION", style = MaterialTheme.typography.titleMedium, color = ArcCyan)
+                    StatusBadge(
+                        text = if (uiState.voiceEnrolled) "ENROLLED" else "OPEN",
+                        color = if (uiState.voiceEnrolled) ProfitEmerald else WarningAmber
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = uiState.speakerStatusSummary,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = ElectricBlue
+                )
+                uiState.voiceEnrollmentProgress?.let { progressMsg ->
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = progressMsg,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = ProfitEmerald
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                SettingToggleRow(
+                    title = "Owner-Only Voice Lock (\"Under Me\")",
+                    subtitle = "Restricts sensitive actions (logins, sending messages, screen control) strictly to your voiceprint",
+                    checked = settings.voiceBiometricLockEnabled,
+                    onCheckedChange = onToggleVoiceBiometricLock,
+                    testTag = "toggle_voice_biometric_lock"
+                )
+                SettingToggleRow(
+                    title = "Flu & Vocal-Strain Adaptation",
+                    subtitle = "Matches your upper-formant vocal tract signature smoothly even if illness, cold, or hoarseness alters pitch",
+                    checked = settings.voiceFluAdaptationEnabled,
+                    onCheckedChange = onToggleVoiceFluAdaptation,
+                    testTag = "toggle_voice_flu_adaptation"
+                )
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = {
+                            if (!hasMicPermission) onRequestMicPermission() else onEnrollOwnerVoice()
+                        },
+                        enabled = uiState.voiceEnrollmentProgress == null,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("enroll_owner_voice_btn")
+                    ) {
+                        Text(if (uiState.voiceEnrolled) "Re-Enroll Voice ID" else "Enroll Voice ID (3x)")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            if (!hasMicPermission) onRequestMicPermission() else onVerifyOwnerVoice()
+                        },
+                        enabled = uiState.voiceEnrolled && uiState.voiceEnrollmentProgress == null,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("verify_owner_voice_btn")
+                    ) {
+                        Text("Check Voice")
+                    }
+                }
+                if (uiState.voiceEnrolled) {
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(
+                        onClick = onClearOwnerVoice,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("clear_owner_voice_btn")
+                    ) {
+                        Text("Clear Saved Owner Voiceprint")
+                    }
+                }
+            }
+        }
+
+        // Visual Screen Feedback & Futuristic HUD
+        item {
+            HudGlassCard(borderColor = ArcCyan.copy(alpha = 0.35f)) {
+                Text("VISUAL ACTION OVERLAYS & HUD", style = MaterialTheme.typography.titleMedium, color = ArcCyan)
+                Spacer(Modifier.height(8.dp))
+                SettingToggleRow(
+                    title = "Show Tap Ripples",
+                    subtitle = "Display glowing cyan tap circles whenever JARVIS taps on screen",
+                    checked = settings.showTapIndicator,
+                    onCheckedChange = onToggleShowTapIndicator,
+                    testTag = "toggle_show_taps"
+                )
+                SettingToggleRow(
+                    title = "Highlight Screen Targets",
+                    subtitle = "Draw glowing borders & #1/#2/#3 contact badges around targets JARVIS picks",
+                    checked = settings.showHighlightIndicator,
+                    onCheckedChange = onToggleShowHighlightIndicator,
+                    testTag = "toggle_show_highlights"
+                )
+                SettingToggleRow(
+                    title = "Show Scroll Indicators",
+                    subtitle = "Render animated directional chevrons during autonomous scrolling",
+                    checked = settings.showScrollIndicator,
+                    onCheckedChange = onToggleShowScrollIndicator,
+                    testTag = "toggle_show_scrolls"
+                )
+                SettingToggleRow(
+                    title = "Futuristic Holographic Telemetry",
+                    subtitle = "Show live Voice ID, Device Learning & Autonomous HUD strip on Home",
+                    checked = settings.futuristicHudMode,
+                    onCheckedChange = onToggleFuturisticHudMode,
+                    testTag = "toggle_futuristic_hud"
+                )
+            }
+        }
+
+        // Daily Self-Learning Studio
+        item {
+            HudGlassCard(borderColor = ElectricBlue.copy(alpha = 0.35f)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("DAILY DEVICE SELF-LEARNING", style = MaterialTheme.typography.titleMedium, color = ArcCyan)
+                    StatusBadge(
+                        text = "${uiState.learnedAppsCount} APPS",
+                        color = ProfitEmerald
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "Studied ${uiState.learnedAppsCount} apps • ${uiState.learnedWorkflowsCount} screen workflows • ${uiState.ownerHabitsCount} learned habits.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = jc.mutedSlate
+                )
+                Spacer(Modifier.height(8.dp))
+                SettingToggleRow(
+                    title = "Learn Device & Habits Daily",
+                    subtitle = "Automatically studies installed apps, UI paths & your daily routine every 24h",
+                    checked = settings.autoLearnDeviceDaily,
+                    onCheckedChange = onToggleAutoLearnDaily,
+                    testTag = "toggle_auto_learn_daily"
+                )
+                Button(
+                    onClick = onStudyDeviceNow,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("study_device_now_btn")
+                ) {
+                    Text("Study Device & Apps Now")
+                }
+            }
+        }
+
         // Memory & Display Controls
         item {
             HudGlassCard {
@@ -434,7 +602,8 @@ private fun SettingToggleRow(
     title: String,
     subtitle: String,
     checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
+    onCheckedChange: (Boolean) -> Unit,
+    testTag: String? = null
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -445,7 +614,11 @@ private fun SettingToggleRow(
             Text(title, style = MaterialTheme.typography.titleMedium)
             Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = LocalJarvisColors.current.mutedSlate)
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            modifier = if (testTag != null) Modifier.testTag(testTag) else Modifier
+        )
     }
     Spacer(Modifier.height(6.dp))
 }

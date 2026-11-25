@@ -114,6 +114,35 @@ data class CachedMarketQuoteEntity(
     val updatedAtMs: Long
 )
 
+@Entity(tableName = "device_app_knowledge")
+data class DeviceAppKnowledgeEntity(
+    @PrimaryKey val packageName: String,
+    val appName: String,
+    val category: String,
+    val discoveredScreensSummary: String = "",
+    val usageCount: Int = 0,
+    val lastStudiedMs: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "learned_workflows")
+data class LearnedWorkflowEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val targetPackageOrSite: String,
+    val goalPhrase: String,
+    val stepsSummary: String,
+    val successCount: Int = 1,
+    val updatedMs: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "owner_habits")
+data class OwnerHabitEntity(
+    @PrimaryKey val habitKey: String,
+    val category: String,
+    val summary: String,
+    val confidenceScore: Float = 0.6f,
+    val updatedMs: Long = System.currentTimeMillis()
+)
+
 @Dao
 interface ConversationDao {
     @Query("SELECT * FROM conversation_messages ORDER BY timestampMs ASC")
@@ -247,6 +276,45 @@ interface MarketCacheDao {
     suspend fun deleteConfiguredSymbol(symbol: String)
 }
 
+@Dao
+interface DeviceKnowledgeDao {
+    @Query("SELECT * FROM device_app_knowledge ORDER BY usageCount DESC, appName ASC")
+    fun observeLearnedApps(): Flow<List<DeviceAppKnowledgeEntity>>
+
+    @Query("SELECT * FROM device_app_knowledge ORDER BY usageCount DESC, appName ASC")
+    suspend fun getAllLearnedAppsSnapshot(): List<DeviceAppKnowledgeEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertApps(apps: List<DeviceAppKnowledgeEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertApp(app: DeviceAppKnowledgeEntity)
+
+    @Query("SELECT * FROM learned_workflows ORDER BY updatedMs DESC")
+    fun observeWorkflows(): Flow<List<LearnedWorkflowEntity>>
+
+    @Query("SELECT * FROM learned_workflows ORDER BY successCount DESC, updatedMs DESC LIMIT 25")
+    suspend fun getTopWorkflowsSnapshot(): List<LearnedWorkflowEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertWorkflow(workflow: LearnedWorkflowEntity): Long
+
+    @Query("SELECT * FROM owner_habits ORDER BY confidenceScore DESC, updatedMs DESC")
+    fun observeOwnerHabits(): Flow<List<OwnerHabitEntity>>
+
+    @Query("SELECT * FROM owner_habits ORDER BY confidenceScore DESC, updatedMs DESC LIMIT 20")
+    suspend fun getTopHabitsSnapshot(): List<OwnerHabitEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertHabit(habit: OwnerHabitEntity)
+
+    @Query("DELETE FROM learned_workflows")
+    suspend fun clearWorkflows()
+
+    @Query("DELETE FROM owner_habits")
+    suspend fun clearHabits()
+}
+
 @Database(
     entities = [
         ConversationMessageEntity::class,
@@ -256,9 +324,12 @@ interface MarketCacheDao {
         AlertNotificationEntity::class,
         AiActivityLogEntity::class,
         ConfiguredSymbolEntity::class,
-        CachedMarketQuoteEntity::class
+        CachedMarketQuoteEntity::class,
+        DeviceAppKnowledgeEntity::class,
+        LearnedWorkflowEntity::class,
+        OwnerHabitEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class JarvisDatabase : RoomDatabase() {
@@ -269,6 +340,7 @@ abstract class JarvisDatabase : RoomDatabase() {
     abstract fun alertNotificationDao(): AlertNotificationDao
     abstract fun aiActivityDao(): AiActivityDao
     abstract fun marketCacheDao(): MarketCacheDao
+    abstract fun deviceKnowledgeDao(): DeviceKnowledgeDao
 
     companion object {
         @Volatile

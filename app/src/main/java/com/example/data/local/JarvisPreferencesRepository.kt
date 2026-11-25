@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -43,7 +44,15 @@ data class JarvisUserSettings(
     val highContrastHud: Boolean = false,
     val supabaseAutoSync: Boolean = false,
     val preferredBroker: String = "DERIV",
-    val floatingOrbEnabled: Boolean = true
+    val floatingOrbEnabled: Boolean = true,
+    val showTapIndicator: Boolean = true,
+    val showHighlightIndicator: Boolean = true,
+    val showScrollIndicator: Boolean = true,
+    val voiceBiometricLockEnabled: Boolean = true,
+    val voiceFluAdaptationEnabled: Boolean = true,
+    val autoLearnDeviceDaily: Boolean = true,
+    val futuristicHudMode: Boolean = true,
+    val lastDailyLearnMs: Long = 0L
 ) {
     val operatingMode: TradingOperatingMode
         get() = when {
@@ -86,6 +95,14 @@ class JarvisPreferencesRepository(private val context: Context) {
         val SUPABASE_AUTO_SYNC = booleanPreferencesKey("supabase_auto_sync")
         val PREFERRED_BROKER = stringPreferencesKey("preferred_broker")
         val FLOATING_ORB_ENABLED = booleanPreferencesKey("floating_orb_enabled")
+        val SHOW_TAP_INDICATOR = booleanPreferencesKey("show_tap_indicator")
+        val SHOW_HIGHLIGHT_INDICATOR = booleanPreferencesKey("show_highlight_indicator")
+        val SHOW_SCROLL_INDICATOR = booleanPreferencesKey("show_scroll_indicator")
+        val VOICE_BIOMETRIC_LOCK = booleanPreferencesKey("voice_biometric_lock_enabled")
+        val VOICE_FLU_ADAPTATION = booleanPreferencesKey("voice_flu_adaptation_enabled")
+        val AUTO_LEARN_DAILY = booleanPreferencesKey("auto_learn_device_daily")
+        val FUTURISTIC_HUD_MODE = booleanPreferencesKey("futuristic_hud_mode")
+        val LAST_DAILY_LEARN_MS = longPreferencesKey("last_daily_learn_ms")
     }
 
     val settingsFlow: Flow<JarvisUserSettings> = context.jarvisDataStore.data.map { prefs ->
@@ -148,7 +165,15 @@ class JarvisPreferencesRepository(private val context: Context) {
             highContrastHud = prefs[Keys.HIGH_CONTRAST_HUD] ?: false,
             supabaseAutoSync = prefs[Keys.SUPABASE_AUTO_SYNC] ?: false,
             preferredBroker = prefs[Keys.PREFERRED_BROKER] ?: "DERIV",
-            floatingOrbEnabled = prefs[Keys.FLOATING_ORB_ENABLED] ?: true
+            floatingOrbEnabled = prefs[Keys.FLOATING_ORB_ENABLED] ?: true,
+            showTapIndicator = prefs[Keys.SHOW_TAP_INDICATOR] ?: true,
+            showHighlightIndicator = prefs[Keys.SHOW_HIGHLIGHT_INDICATOR] ?: true,
+            showScrollIndicator = prefs[Keys.SHOW_SCROLL_INDICATOR] ?: true,
+            voiceBiometricLockEnabled = prefs[Keys.VOICE_BIOMETRIC_LOCK] ?: true,
+            voiceFluAdaptationEnabled = prefs[Keys.VOICE_FLU_ADAPTATION] ?: true,
+            autoLearnDeviceDaily = prefs[Keys.AUTO_LEARN_DAILY] ?: true,
+            futuristicHudMode = prefs[Keys.FUTURISTIC_HUD_MODE] ?: true,
+            lastDailyLearnMs = prefs[Keys.LAST_DAILY_LEARN_MS] ?: 0L
         )
     }
 
@@ -327,5 +352,37 @@ class JarvisPreferencesRepository(private val context: Context) {
 
     suspend fun setFloatingOrbEnabled(enabled: Boolean) {
         context.jarvisDataStore.edit { it[Keys.FLOATING_ORB_ENABLED] = enabled }
+    }
+
+    suspend fun setShowTapIndicator(enabled: Boolean) {
+        context.jarvisDataStore.edit { it[Keys.SHOW_TAP_INDICATOR] = enabled }
+    }
+
+    suspend fun setShowHighlightIndicator(enabled: Boolean) {
+        context.jarvisDataStore.edit { it[Keys.SHOW_HIGHLIGHT_INDICATOR] = enabled }
+    }
+
+    suspend fun setShowScrollIndicator(enabled: Boolean) {
+        context.jarvisDataStore.edit { it[Keys.SHOW_SCROLL_INDICATOR] = enabled }
+    }
+
+    suspend fun setVoiceBiometricLockEnabled(enabled: Boolean) {
+        context.jarvisDataStore.edit { it[Keys.VOICE_BIOMETRIC_LOCK] = enabled }
+    }
+
+    suspend fun setVoiceFluAdaptationEnabled(enabled: Boolean) {
+        context.jarvisDataStore.edit { it[Keys.VOICE_FLU_ADAPTATION] = enabled }
+    }
+
+    suspend fun setAutoLearnDeviceDaily(enabled: Boolean) {
+        context.jarvisDataStore.edit { it[Keys.AUTO_LEARN_DAILY] = enabled }
+    }
+
+    suspend fun setFuturisticHudMode(enabled: Boolean) {
+        context.jarvisDataStore.edit { it[Keys.FUTURISTIC_HUD_MODE] = enabled }
+    }
+
+    suspend fun markDailyLearnCompleted(timestampMs: Long = System.currentTimeMillis()) {
+        context.jarvisDataStore.edit { it[Keys.LAST_DAILY_LEARN_MS] = timestampMs }
     }
 }
