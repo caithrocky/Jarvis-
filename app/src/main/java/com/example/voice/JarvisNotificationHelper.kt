@@ -18,6 +18,7 @@ import com.example.R
 object JarvisNotificationHelper {
     const val VOICE_CHANNEL_ID = "jarvis_voice_listener_channel"
     const val ALERTS_CHANNEL_ID = "jarvis_market_alerts_channel"
+    const val UPDATE_CHANNEL_ID = "jarvis_update_channel"
     const val VOICE_NOTIFICATION_ID = 1001
 
     fun ensureChannels(context: Context) {
@@ -40,6 +41,14 @@ object JarvisNotificationHelper {
             }
             nm.createNotificationChannel(voiceChannel)
             nm.createNotificationChannel(alertsChannel)
+            val updateChannel = NotificationChannel(
+                UPDATE_CHANNEL_ID,
+                context.getString(R.string.update_channel_name),
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = context.getString(R.string.update_channel_desc)
+            }
+            nm.createNotificationChannel(updateChannel)
         }
     }
 
@@ -97,5 +106,36 @@ object JarvisNotificationHelper {
             .build()
 
         NotificationManagerCompat.from(context).notify(id, notification)
+    }
+
+    fun postUpdateAvailable(context: Context, versionName: String, releaseNotes: String) {
+        ensureChannels(context)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) return
+        }
+
+        val installIntent = Intent(context, com.example.update.InstallUpdateReceiver::class.java)
+        val installPendingIntent = PendingIntent.getBroadcast(
+            context,
+            2001,
+            installIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(context, UPDATE_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle("Jarvis $versionName is ready")
+            .setContentText("The update was downloaded automatically.")
+            .setStyle(NotificationCompat.BigTextStyle().bigText(releaseNotes))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .addAction(android.R.drawable.stat_sys_download_done, "Install", installPendingIntent)
+            .setContentIntent(installPendingIntent)
+            .build()
+        NotificationManagerCompat.from(context).notify(2001, notification)
     }
 }

@@ -45,6 +45,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -96,6 +98,8 @@ data class JarvisUiState(
     val finnhubReachable: Boolean? = null,
     val finnhubHealthDetail: String? = null,
     val diagnosticResult: String? = null,
+    val updateStatus: String = "Automatic update checks run at startup and every 12 hours.",
+    val isCheckingForUpdates: Boolean = false,
     val snackbarMessage: String? = null
 )
 
@@ -229,6 +233,39 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     fun clearSnackbar() {
         _uiState.update { it.copy(snackbarMessage = null) }
+    }
+
+    fun checkForUpdates() {
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(isCheckingForUpdates = true, updateStatus = "Checking GitHub Releases...")
+            }
+            val result = withContext(Dispatchers.IO) {
+                runCatching { app.updateRepository.checkAndDownload() }.getOrNull()
+            }
+            if (result != null) {
+                com.example.voice.JarvisNotificationHelper.postUpdateAvailable(
+                    app,
+                    result.versionName,
+                    result.releaseNotes
+                )
+                _uiState.update {
+                    it.copy(
+                        isCheckingForUpdates = false,
+                        updateStatus = "Jarvis ${result.versionName} downloaded. Tap Install in the notification.",
+                        snackbarMessage = "Update ${result.versionName} downloaded automatically."
+                    )
+                }
+            } else {
+                _uiState.update {
+                    it.copy(
+                        isCheckingForUpdates = false,
+                        updateStatus = "No newer release is available.",
+                        snackbarMessage = "Jarvis is up to date."
+                    )
+                }
+            }
+        }
     }
 
     fun onOrbTapped(hasMicPermission: Boolean) {

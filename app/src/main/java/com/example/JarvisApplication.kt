@@ -15,6 +15,8 @@ import com.example.security.SecureCredentialStore
 import com.example.voice.JarvisNotificationHelper
 import com.example.voice.JarvisVoiceEngine
 import com.example.voice.MarketMonitorWorker
+import com.example.update.UpdateCheckWorker
+import com.example.update.UpdateRepository
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
@@ -46,6 +48,8 @@ class JarvisApplication : Application() {
         private set
     lateinit var voiceEngine: JarvisVoiceEngine
         private set
+    lateinit var updateRepository: UpdateRepository
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -69,7 +73,10 @@ class JarvisApplication : Application() {
         brokerRepository = BrokerRepository(httpClient, credentialStore)
         supabaseClient = SupabaseSyncClient(httpClient, credentialStore)
         voiceEngine = JarvisVoiceEngine(this, magpieTtsClient)
+        updateRepository = UpdateRepository(this, httpClient)
 
         MarketMonitorWorker.schedulePeriodic(this)
+        UpdateCheckWorker.schedulePeriodic(this)
+        UpdateCheckWorker.runOnce(this)
     }
 }

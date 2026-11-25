@@ -60,7 +60,8 @@ fun SettingsScreen(
     onUpdateNotificationPrefs: (Boolean, Boolean, Boolean, Boolean) -> Unit,
     onToggleHighContrastHud: (Boolean) -> Unit,
     onToggleSupabaseSync: (Boolean) -> Unit,
-    onTestNvidiaConnection: () -> Unit
+    onTestNvidiaConnection: () -> Unit,
+    onCheckForUpdates: () -> Unit
 ) {
     val context = LocalContext.current
     val jc = LocalJarvisColors.current
@@ -74,6 +75,22 @@ fun SettingsScreen(
             Column {
                 Text("SYSTEM SETTINGS", style = MaterialTheme.typography.headlineMedium, color = ElectricBlue)
                 Text("NVIDIA NIM models, voice engine, privacy & API diagnostics", style = MaterialTheme.typography.bodyMedium, color = jc.mutedSlate)
+            }
+        }
+
+        item {
+            HudGlassCard {
+                Text("AUTOMATIC UPDATES", style = MaterialTheme.typography.titleMedium, color = ArcCyan)
+                Spacer(Modifier.height(6.dp))
+                Text(uiState.updateStatus, style = MaterialTheme.typography.bodyMedium, color = jc.mutedSlate)
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = onCheckForUpdates,
+                    enabled = !uiState.isCheckingForUpdates,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (uiState.isCheckingForUpdates) "CHECKING..." else "Check & Download Update")
+                }
             }
         }
 

@@ -389,7 +389,8 @@ fun JarvisApp(viewModel: JarvisViewModel) {
                                     onUpdateNotificationPrefs = viewModel::updateNotificationPrefs,
                                     onToggleHighContrastHud = viewModel::setHighContrastHud,
                                     onToggleSupabaseSync = viewModel::setSupabaseAutoSync,
-                                    onTestNvidiaConnection = viewModel::testNvidiaNimConnection
+                                    onTestNvidiaConnection = viewModel::testNvidiaNimConnection,
+                                    onCheckForUpdates = viewModel::checkForUpdates
                                 )
                             }
                         }
