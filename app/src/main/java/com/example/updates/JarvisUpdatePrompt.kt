@@ -2,6 +2,9 @@ package com.example.updates
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
+import android.content.pm.Signature
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -29,6 +32,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.core.content.pm.PackageInfoCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -145,7 +149,7 @@ fun JarvisUpdatePrompt(forceCheck: Boolean = false) {
                                 progress = null
                                 result.onSuccess {
                                     downloadedApk = it
-                                    message = "Download verified (SHA-256 matches). Tap Install update to continue."
+                                    message = "Download verified (checksum, app ID, version and signing key). Tap Install update to continue."
                                 }.onFailure { t ->
                                     message = if (t is IOException) {
                                         "Download interrupted. Check your connection and tap Download update to try again."
@@ -294,6 +298,7 @@ private fun downloadAndVerify(
             "Checksum mismatch: the download is corrupted or has been tampered with."
         }
         check(part.renameTo(apk)) { "Could not save the verified update." }
+        verifyApk(context, apk)
         return apk
     } catch (t: Throwable) {
         part.delete()
@@ -312,4 +317,53 @@ private fun compareVersions(first: String, second: String): Int {
         if (left != right) return left.compareTo(right)
     }
     return 0
+}
+
+@Suppress("DEPRECATION")
+private fun signatureFlags(): Int =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        PackageManager.GET_SIGNING_CERTIFICATES
+    } else {
+        PackageManager.GET_SIGNATURES
+    }
+
+@Suppress("DEPRECATION")
+private fun certDigests(info: PackageInfo): Set<String> {
+    val signers: Array<Signature> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        val signingInfo = info.signingInfo ?: return emptySet()
+        if (signingInfo.hasMultipleSigners()) {
+            signingInfo.apkContentsSigners
+        } else {
+            signingInfo.signingCertificateHistory
+        }
+    } else {
+        info.signatures ?: return emptySet()
+    }
+    val digest = MessageDigest.getInstance("SHA-256")
+    return signers.map { sig ->
+        digest.digest(sig.toByteArray()).joinToString("") { "%02x".format(it) }
+    }.toSet()
+}
+
+@Suppress("DEPRECATION")
+private fun verifyApk(context: Context, apk: File) {
+    val pm = context.packageManager
+    val flags = signatureFlags()
+    val archive = pm.getPackageArchiveInfo(apk.absolutePath, flags)
+        ?: error("The downloaded file is not a valid APK.")
+    val installed = pm.getPackageInfo(context.packageName, flags)
+    check(archive.packageName == context.packageName) {
+        "The update is for a different app (${archive.packageName})."
+    }
+    check(PackageInfoCompat.getLongVersionCode(archive) > PackageInfoCompat.getLongVersionCode(installed)) {
+        "The downloaded update is not newer than the installed version."
+    }
+    val installedCerts = certDigests(installed)
+    val archiveCerts = certDigests(archive)
+    check(installedCerts.isNotEmpty() && archiveCerts.isNotEmpty()) {
+        "Could not read the signing certificates."
+    }
+    check(archiveCerts.any { it in installedCerts }) {
+        "This update is signed with a different key than the installed JARVIS, so Android would refuse it. Uninstall JARVIS once and install the release APK; after that, updates work in place."
+    }
 }
