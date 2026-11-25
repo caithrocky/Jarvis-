@@ -123,6 +123,31 @@ jobs:
           test -s release-assets/Jarvis.apk
           ls -lh release-assets/Jarvis.apk
 
+      - name: Inspect and checksum release APK
+        if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != ''
+        run: |
+          set -euo pipefail
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$BT/aapt2" dump badging release-assets/Jarvis.apk | grep -E "^package:" | tee badging.txt
+          grep -q "name='com.aistudio.jarvisai.xk9m2q'" badging.txt
+          grep -q "versionName='${VERSION_NAME}'" badging.txt
+          grep -q "versionCode='${APP_VERSION_CODE}'" badging.txt
+          "$BT/apksigner" verify --print-certs release-assets/Jarvis.apk | grep -E "Signer #1 certificate SHA-256"
+          cd release-assets
+          sha256sum Jarvis.apk > Jarvis.apk.sha256
+          cat Jarvis.apk.sha256
+
+      - name: Upload signed release APK
+        if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: Jarvis-Android-Release-APK
+          path: |
+            release-assets/Jarvis.apk
+            release-assets/Jarvis.apk.sha256
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Publish GitHub Release
         if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != '' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
