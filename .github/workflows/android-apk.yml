@@ -126,16 +126,18 @@ jobs:
       - name: Inspect and checksum release APK
         if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != ''
         run: |
-          set -euo pipefail
           BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          "$BT/aapt2" dump badging release-assets/Jarvis.apk | grep -E "^package:" | tee badging.txt
-          grep -q "name='com.aistudio.jarvisai.xk9m2q'" badging.txt
-          grep -q "versionName='${VERSION_NAME}'" badging.txt
-          grep -q "versionCode='${APP_VERSION_CODE}'" badging.txt
-          "$BT/apksigner" verify --print-certs release-assets/Jarvis.apk | grep -E "Signer #1 certificate SHA-256"
-          cd release-assets
-          sha256sum Jarvis.apk > Jarvis.apk.sha256
-          cat Jarvis.apk.sha256
+          echo "build-tools: $BT"
+          "$BT/aapt2" dump badging release-assets/Jarvis.apk > badging.txt
+          grep -E "^package:" badging.txt | cut -c1-160
+          FAIL=0
+          grep -q "name='com.aistudio.jarvisai.xk9m2q'" badging.txt && echo "PASS app id" || { echo "FAIL app id"; FAIL=1; }
+          grep -q "versionName='${VERSION_NAME}'" badging.txt && echo "PASS versionName" || { echo "FAIL versionName"; FAIL=1; }
+          grep -q "versionCode='${APP_VERSION_CODE}'" badging.txt && echo "PASS versionCode" || { echo "FAIL versionCode"; FAIL=1; }
+          "$BT/apksigner" verify --print-certs release-assets/Jarvis.apk > sign.txt 2>&1 && echo "PASS signature verifies" || { echo "FAIL signature"; FAIL=1; }
+          grep -E "Signer|WARNING|ERROR" sign.txt | cut -c1-160 | head -12
+          (cd release-assets && sha256sum Jarvis.apk > Jarvis.apk.sha256 && cat Jarvis.apk.sha256)
+          [ "$FAIL" = "0" ]
 
       - name: Upload signed release APK
         if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != ''
