@@ -150,21 +150,39 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Refuse to overwrite an existing release
+        if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != '' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v${VERSION_NAME}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release v${VERSION_NAME} already exists; refusing to overwrite"
+            exit 1
+          fi
+
       - name: Publish GitHub Release
         if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != '' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.VERSION_NAME }}
+          target_commitish: ${{ github.sha }}
           name: JARVIS ${{ env.VERSION_NAME }}
           body: |
             Automatic JARVIS Android release.
 
             versionName: ${{ env.VERSION_NAME }}
-            versionCode: ${{ env.VERSION_CODE }}
+            versionCode: ${{ env.APP_VERSION_CODE }}
+            Commit: ${{ github.sha }}
 
-            Download Jarvis.apk and install it over your existing app.
-          files: release-assets/Jarvis.apk
+            Download Jarvis.apk and install it over your existing app. Jarvis.apk.sha256 holds its SHA-256 checksum.
+          files: |
+            release-assets/Jarvis.apk
+            release-assets/Jarvis.apk.sha256
+          generate_release_notes: true
+          draft: false
+          prerelease: false
           make_latest: true
+          fail_on_unmatched_files: true
 
       - name: Explain why signed release was skipped
         if: env.KEYSTORE_BASE64 == '' || env.STORE_PASSWORD == '' || env.KEY_PASSWORD == ''
