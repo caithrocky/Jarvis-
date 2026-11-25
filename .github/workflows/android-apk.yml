@@ -1,4 +1,3 @@
-
 name: Build Jarvis Android APK
 
 on:
@@ -9,17 +8,21 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: jarvis-android-apk-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
-    name: Build debug APK
+    name: Build Jarvis APK
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
+    env:
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+      STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
     steps:
       - name: Checkout Jarvis source
@@ -53,17 +56,22 @@ jobs:
 
       - name: Create debug signing key
         run: |
-          if [ ! -f debug.keystore ]; then
-            keytool -genkeypair -v \
-              -keystore debug.keystore \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          fi
+          keytool -genkeypair -v \
+            -keystore debug.keystore \
+            -storepass android \
+            -alias androiddebugkey \
+            -keypass android \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Set build version
+        run: |
+          echo "VERSION_CODE=$((1000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=1.1.$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          echo "APP_VERSION_CODE=$((1000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+          echo "APP_VERSION_NAME=1.1.$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
 
       - name: Verify Android project structure
         run: |
@@ -75,18 +83,108 @@ jobs:
       - name: Build Jarvis debug APK
         run: gradle --no-daemon --stacktrace :app:assembleDebug
 
-      - name: Verify APK output
-        run: |
-          APK_PATH="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' -print -quit)"
-          test -n "$APK_PATH"
-          echo "APK created: $APK_PATH"
-          ls -lh "$APK_PATH"
-
-      - name: Upload Jarvis APK
+      - name: Upload Jarvis debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Jarvis-Android-APK
+          name: Jarvis-Android-Debug-APK
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
-          
+
+      - name: Prepare permanent release signing key
+        if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != ''
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > my-upload-key.jks
+          test -s my-upload-key.jks
+          echo "KEYSTORE_PATH=$GITHUB_WORKSPACE/my-upload-key.jks" >> "$GITHUB_ENV"
+
+      - name: Verify permanent release signing credentials
+        if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != ''
+        env:
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          keytool -list -keystore my-upload-key.jks -storepass "$STORE_PASSWORD" -alias upload >/dev/null
+          keytool -certreq -alias upload -keystore my-upload-key.jks \
+            -storepass "$STORE_PASSWORD" \
+            -keypass "$KEY_PASSWORD" \
+            -file "$RUNNER_TEMP/jarvis-signing-check.csr" >/dev/null
+          echo "Release keystore and private-key credentials verified."
+
+      - name: Build signed release APK
+        if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != ''
+        run: gradle --no-daemon --stacktrace :app:assembleRelease
+
+      - name: Stage release APK
+        if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != ''
+        run: |
+          mkdir -p release-assets
+          cp app/build/outputs/apk/release/*.apk release-assets/Jarvis.apk
+          test -s release-assets/Jarvis.apk
+          ls -lh release-assets/Jarvis.apk
+
+      - name: Inspect and checksum release APK
+        if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != ''
+        run: |
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "build-tools: $BT"
+          "$BT/aapt2" dump badging release-assets/Jarvis.apk > badging.txt
+          grep -E "^package:" badging.txt | cut -c1-160
+          FAIL=0
+          grep -q "name='com.aistudio.jarvisai.xk9m2q'" badging.txt && echo "PASS app id" || { echo "FAIL app id"; FAIL=1; }
+          grep -q "versionName='${VERSION_NAME}'" badging.txt && echo "PASS versionName" || { echo "FAIL versionName"; FAIL=1; }
+          grep -q "versionCode='${APP_VERSION_CODE}'" badging.txt && echo "PASS versionCode" || { echo "FAIL versionCode"; FAIL=1; }
+          "$BT/apksigner" verify --print-certs release-assets/Jarvis.apk > sign.txt 2>&1 && echo "PASS signature verifies" || { echo "FAIL signature"; FAIL=1; }
+          grep -E "Signer|WARNING|ERROR" sign.txt | cut -c1-160 | head -12
+          (cd release-assets && sha256sum Jarvis.apk > Jarvis.apk.sha256 && cat Jarvis.apk.sha256)
+          [ "$FAIL" = "0" ]
+
+      - name: Upload signed release APK
+        if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: Jarvis-Android-Release-APK
+          path: |
+            release-assets/Jarvis.apk
+            release-assets/Jarvis.apk.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Refuse to overwrite an existing release
+        if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != '' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v${VERSION_NAME}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release v${VERSION_NAME} already exists; refusing to overwrite"
+            exit 1
+          fi
+
+      - name: Publish GitHub Release
+        if: env.KEYSTORE_BASE64 != '' && env.STORE_PASSWORD != '' && env.KEY_PASSWORD != '' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION_NAME }}
+          target_commitish: ${{ github.sha }}
+          name: JARVIS ${{ env.VERSION_NAME }}
+          body: |
+            Automatic JARVIS Android release.
+
+            versionName: ${{ env.VERSION_NAME }}
+            versionCode: ${{ env.APP_VERSION_CODE }}
+            Commit: ${{ github.sha }}
+
+            Download Jarvis.apk and install it over your existing app. Jarvis.apk.sha256 holds its SHA-256 checksum.
+          files: |
+            release-assets/Jarvis.apk
+            release-assets/Jarvis.apk.sha256
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          make_latest: true
+          fail_on_unmatched_files: true
+
+      - name: Explain why signed release was skipped
+        if: env.KEYSTORE_BASE64 == '' || env.STORE_PASSWORD == '' || env.KEY_PASSWORD == ''
+        run: |
+          echo "::notice::Debug APK built. Signed release build skipped: confirm KEYSTORE_BASE64, STORE_PASSWORD and KEY_PASSWORD are all configured."
