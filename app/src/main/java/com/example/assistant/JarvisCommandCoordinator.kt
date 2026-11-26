@@ -157,11 +157,13 @@ class JarvisCommandCoordinator(
                         overlayPermissionGranted = Settings.canDrawOverlays(context)
                     )
                     // Rule 2.2 / 2.4: Never launch Mini Orb if Full App is open; launch it expanded when closed.
+                    // Note: JarvisVoiceEngine speaks "Yes Sir, I'm listening." with followUpListen = true on bare wake;
+                    // passing startListening = false avoids interrupting that greeting mid-sentence.
                     if (decision.shouldOpenMiniOrb) {
                         JarvisFloatingOrbService.start(
                             context,
                             expandBubble = true,
-                            startListening = remainder.isBlank()
+                            startListening = false
                         )
                     }
                 }
@@ -231,7 +233,27 @@ class JarvisCommandCoordinator(
             abortAllPendingActions()
             scope.launch {
                 val settings = prefsRepo.settingsFlow.first()
-                finishDirectReply("Stopped everything right away, Sir.", "Owner Abort", settings, fromVoice)
+                finishDirectReply("Stopped everything right away, Sir.", "Owner Abort", settings, fromVoice, followUpListen = false)
+            }
+            return
+        }
+
+        val normalizedWrapUp = lower.replace(Regex("[!?.,]+$"), "").trim()
+        if (pendingMessageSession == null && awaitingWebsiteLinkFor == null && normalizedWrapUp in setOf(
+                "that's all", "thats all", "that will be all", "nothing else",
+                "thank you jarvis", "thanks jarvis", "bye jarvis", "goodbye jarvis",
+                "stop listening", "go to standby", "you can sleep"
+            )
+        ) {
+            scope.launch {
+                val settings = prefsRepo.settingsFlow.first()
+                finishDirectReply(
+                    "Anytime, Sir. I'll stay quietly on standby—just say my name when you need me.",
+                    "Standby",
+                    settings,
+                    fromVoice,
+                    followUpListen = false
+                )
             }
             return
         }
@@ -466,10 +488,16 @@ class JarvisCommandCoordinator(
                                     val openRes = JarvisSystemAssistant.openWebsiteInChrome(context, found)
                                     executedActionLabels.add(openRes.actionLabel)
                                     localRepo.logAiActivity("CHROME_OPEN", "Resolved ${cmd.primaryArg} -> $found")
-                                    if (hasMoreSteps && openRes.launchedTarget) delay(1300L)
+                                    if (!openRes.launchedTarget) {
+                                        taskFailed = true
+                                        actionNotes.add(openRes.replyText)
+                                    } else if (hasMoreSteps) {
+                                        waitForAppForeground(svc, "chrome", 3600L)
+                                    }
                                 } else {
                                     awaitingWebsiteLinkFor = cmd.primaryArg
                                     executedActionLabels.add("Ask Link")
+                                    actionNotes.add("I couldn't find the exact website address for \"${cmd.primaryArg}\", Sir. Tell me the domain and I'll open it in Chrome.")
                                 }
                             }
                             SystemIntentKind.WEB_LOOKUP -> executedActionLabels.add("Internet Lookup")
@@ -477,6 +505,7 @@ class JarvisCommandCoordinator(
                                 if ((cmd.kind == SystemIntentKind.SIGNIN_ASSIST || cmd.kind == SystemIntentKind.SIGNUP_ASSIST) &&
                                     !verifyOwnerLockIfNeeded(currentSettings, fromVoice, "credential form filling")
                                 ) {
+                                    taskFailed = true
                                     actionNotes.add("Voiceprint verification required to fill saved credentials under Sir's lock.")
                                 } else {
                                     val outcome = JarvisSystemAssistant.execute(context, cmd)
@@ -487,13 +516,38 @@ class JarvisCommandCoordinator(
                                     if (cmd.kind == SystemIntentKind.OPEN_APP && outcome.launchedTarget) {
                                         deviceLearningEngine.recordAppInteraction(cmd.primaryArg)
                                     }
+                                    val isActionableKind = cmd.kind in setOf(
+                                        SystemIntentKind.OPEN_APP,
+                                        SystemIntentKind.OPEN_URL,
+                                        SystemIntentKind.PLATFORM_SEARCH,
+                                        SystemIntentKind.WEB_SEARCH,
+                                        SystemIntentKind.SIGNIN_ASSIST,
+                                        SystemIntentKind.SIGNUP_ASSIST,
+                                        SystemIntentKind.TAP_TEXT,
+                                        SystemIntentKind.TYPE_TEXT,
+                                        SystemIntentKind.CLICK_NODE_INDEX,
+                                        SystemIntentKind.SEARCH_IN_APP,
+                                        SystemIntentKind.GLOBAL_NAV,
+                                        SystemIntentKind.SCROLL_SCREEN,
+                                        SystemIntentKind.APP_SETTINGS,
+                                        SystemIntentKind.OPEN_SETTINGS,
+                                        SystemIntentKind.MEDIA_PLAY_SEARCH,
+                                        SystemIntentKind.OPEN_CAMERA,
+                                        SystemIntentKind.OPEN_MAPS,
+                                        SystemIntentKind.CALL_DIAL,
+                                        SystemIntentKind.SEND_SMS,
+                                        SystemIntentKind.SEND_EMAIL,
+                                        SystemIntentKind.SET_ALARM,
+                                        SystemIntentKind.SET_TIMER
+                                    )
                                     if (hasMoreSteps && outcome.launchedTarget &&
-                                        cmd.kind in setOf(SystemIntentKind.OPEN_APP, SystemIntentKind.OPEN_URL, SystemIntentKind.PLATFORM_SEARCH)
+                                        cmd.kind in setOf(SystemIntentKind.OPEN_APP, SystemIntentKind.OPEN_URL, SystemIntentKind.PLATFORM_SEARCH, SystemIntentKind.WEB_SEARCH)
                                     ) {
-                                        delay(1300L)
-                                    } else if (!outcome.launchedTarget && outcome.replyText.isNotBlank() &&
-                                        (cmd.kind == SystemIntentKind.SIGNIN_ASSIST || cmd.kind == SystemIntentKind.SIGNUP_ASSIST || cmd.kind == SystemIntentKind.OPEN_APP)
-                                    ) {
+                                        val waitTarget = if (cmd.kind == SystemIntentKind.OPEN_APP) cmd.primaryArg else "chrome"
+                                        waitForAppForeground(svc, waitTarget, 3800L)
+                                        delay(320L)
+                                    } else if (isActionableKind && !outcome.launchedTarget && outcome.replyText.isNotBlank()) {
+                                        taskFailed = true
                                         actionNotes.add(outcome.replyText)
                                     }
                                 }
@@ -675,6 +729,49 @@ class JarvisCommandCoordinator(
         return res.state == SpeakerMatchState.VERIFIED_OWNER || res.state == SpeakerMatchState.VERIFIED_VOCAL_SHIFT
     }
 
+    private suspend fun waitForAppForeground(
+        svc: JarvisAccessibilityService?,
+        appOrPlatform: String,
+        maxWaitMs: Long = 4000L
+    ): Boolean {
+        if (svc == null) {
+            delay(minOf(1300L, maxWaitMs))
+            return false
+        }
+        val lower = appOrPlatform.lowercase(Locale.US).trim()
+        val expectedHints = when {
+            lower.contains("whatsapp") -> listOf("whatsapp")
+            lower.contains("instagram") -> listOf("instagram")
+            lower.contains("snapchat") -> listOf("snapchat")
+            lower.contains("telegram") -> listOf("telegram")
+            lower.contains("messenger") -> listOf("orca", "messenger")
+            lower.contains("chrome") -> listOf("chrome", "browser")
+            lower == "x" || lower.contains("twitter") -> listOf("twitter", "com.x.")
+            lower.contains("tiktok") -> listOf("tiktok", "musically")
+            lower.contains("youtube") -> listOf("youtube")
+            lower.contains("spotify") -> listOf("spotify")
+            lower.contains("discord") -> listOf("discord")
+            lower.contains("reddit") -> listOf("reddit")
+            lower.contains("facebook") -> listOf("facebook", "katana")
+            else -> listOf(lower.replace(Regex("[^a-z0-9]"), "")).filter { it.length >= 2 }
+        }
+        if (expectedHints.isEmpty()) {
+            delay(950L)
+            return true
+        }
+        val deadline = System.currentTimeMillis() + maxWaitMs
+        while (System.currentTimeMillis() < deadline && !abortRequested) {
+            val fg = svc.activeForegroundPackage().orEmpty().lowercase(Locale.US)
+            if (fg.isNotBlank() && fg != context.packageName.lowercase(Locale.US) &&
+                expectedHints.any { fg.contains(it) }
+            ) {
+                return true
+            }
+            delay(220L)
+        }
+        return false
+    }
+
     private suspend fun executeCrossPlatformTextFlow(
         cmd: ParsedSystemCommand,
         settings: JarvisUserSettings,
@@ -706,16 +803,41 @@ class JarvisCommandCoordinator(
             return launchOutcome.replyText to "App Lookup"
         }
         deviceLearningEngine.recordAppInteraction(platform)
-        delay(1450L)
 
-        val firstSearch = svc.findAndTapSearchAndType(contact)
-        if (!firstSearch.success) {
-            delay(750L)
-            svc.findAndTapSearchAndType(contact)
+        val enteredForeground = waitForAppForeground(svc, platform, maxWaitMs = 4000L)
+        if (!enteredForeground) {
+            _autonomousStepStatus.value = ""
+            return "I triggered $platform, Sir, but Android hasn't brought $platform onto the screen yet (check Screen Helper or if the screen is locked)." to "$platform Launch Blocked"
         }
-        delay(1250L)
+        delay(380L)
 
-        val candidates = svc.findContactCandidates(contact)
+        // Prepare Inbox / DM tab or back out of a previously open chat before searching
+        if (svc.navigateMessagingAppToSearchArea(platform)) {
+            delay(650L)
+        }
+
+        var searchTyped = false
+        var lastSearchResult = ScreenActionResult(false, "")
+        for (attempt in 1..3) {
+            if (abortRequested) break
+            lastSearchResult = svc.findAndTapSearchAndType(contact)
+            if (lastSearchResult.success) {
+                searchTyped = true
+                break
+            }
+            delay(520L)
+        }
+
+        // Poll contact results dynamically so slower devices finish rendering rows
+        var candidates: List<ContactCandidateMatch> = emptyList()
+        if (searchTyped) {
+            for (poll in 1..6) {
+                if (abortRequested) break
+                delay(380L)
+                candidates = svc.findContactCandidates(contact)
+                if (candidates.isNotEmpty()) break
+            }
+        }
         _autonomousStepStatus.value = ""
 
         if (candidates.size >= 2) {
@@ -727,7 +849,7 @@ class JarvisCommandCoordinator(
                     accentColor = Color.rgb(0, 229, 255)
                 )
             }
-            svc.showHighlightsOnScreen(highlights, durationMs = 12_000L)
+            svc.showHighlightsOnScreen(highlights, durationMs = 15_000L)
             pendingMessageSession = PendingMessageSession(
                 platform = platform,
                 contactQuery = contact,
@@ -743,14 +865,19 @@ class JarvisCommandCoordinator(
         if (candidates.size == 1) {
             val chosen = candidates.first()
             svc.tapBoundsCenter(chosen.bounds, chosen.displayName)
-            delay(950L)
+            for (poll in 1..5) {
+                if (abortRequested) break
+                delay(320L)
+                if (svc.hasMessageComposeBox()) break
+            }
             return stageMessageAndAskSendConfirmation(svc, platform, chosen.displayName, messageText)
         }
 
-        val screenText = svc.readScreenSummary().lowercase(Locale.US)
-        return if (screenText.contains("input fields:") && (screenText.contains("message") || screenText.contains("chat"))) {
-            stageMessageAndAskSendConfirmation(svc, platform, contact, messageText)
-        } else {
+        if (svc.hasMessageComposeBox()) {
+            return stageMessageAndAskSendConfirmation(svc, platform, contact, messageText)
+        }
+
+        return if (searchTyped) {
             pendingMessageSession = PendingMessageSession(
                 platform = platform,
                 contactQuery = contact,
@@ -759,6 +886,8 @@ class JarvisCommandCoordinator(
                 candidates = emptyList()
             )
             "I opened $platform and searched for \"$contact\", Sir, but didn't get a clear clickable result row yet. Tap the chat you want or tell me what's visible and I'll type your message." to "$platform Search"
+        } else {
+            "I opened $platform, Sir, but couldn't open the contact search automatically (check if $platform has an app lock or tap the chat manually). ${lastSearchResult.message}".trim() to "$platform Search"
         }
     }
 
@@ -910,7 +1039,8 @@ class JarvisCommandCoordinator(
                 val openRes = JarvisSystemAssistant.execute(context, ParsedSystemCommand(SystemIntentKind.OPEN_APP, platform))
                 if (!openRes.launchedTarget) return openRes.replyText to "App Lookup"
                 deviceLearningEngine.recordAppInteraction(platform)
-                delay(1400L)
+                waitForAppForeground(svc, platform, 3600L)
+                delay(320L)
             }
         }
 
@@ -923,17 +1053,20 @@ class JarvisCommandCoordinator(
         val svc = JarvisAccessibilityService.activeInstance()
             ?: return "Turn on JARVIS Screen Helper first, Sir, so I can inspect the screen and complete that task automatically."
 
+        val maxSteps = 12
         val stepLog = mutableListOf<String>()
         var lastPkg = svc.activeForegroundPackage().orEmpty()
+        var lastActionSignature = ""
+        var repeatedActionCount = 0
 
-        for (step in 1..6) {
+        for (step in 1..maxSteps) {
             if (abortRequested) {
                 _autonomousStepStatus.value = ""
                 return "Paused autonomous steps at your command, Sir."
             }
 
-            updateTaskProgress(TaskStage.EXECUTING, "Autonomous Agent", "Studying screen (step $step/6)", step, 6)
-            _autonomousStepStatus.value = "Autonomous step $step/6: studying screen..."
+            updateTaskProgress(TaskStage.EXECUTING, "Autonomous Agent", "Studying screen (step $step/$maxSteps)", step, maxSteps)
+            _autonomousStepStatus.value = "Autonomous step $step/$maxSteps: studying screen..."
             val (screenMap, _) = svc.readRichScreenMap(maxNodes = 36)
             lastPkg = svc.activeForegroundPackage().orEmpty()
 
@@ -941,9 +1074,11 @@ class JarvisCommandCoordinator(
                 Goal requested by Sir: "$goal"
                 Steps taken so far: ${stepLog.ifEmpty { listOf("none") }.joinToString(" -> ")}
                 Look at Live Indexed UI Elements carefully and output ONLY ONE next concrete action tag to advance the goal, plus a 1-sentence human explanation:
-                - Use [ACTION:CLICK_INDEX|n] to tap an exact element number from Live Indexed UI Elements.
+                - Use [ACTION:OPEN_APP|AppName] to launch any installed app, or [ACTION:OPEN_CHROME|https://...] to open a webpage.
+                - Use [ACTION:CLICK_INDEX|n] to tap an exact element number from Live Indexed UI Elements, or [ACTION:TAP_TEXT|button label].
                 - Use [ACTION:SEARCH_IN_APP|query] or [ACTION:TYPE_TEXT|text|field] to enter text.
-                - Use [ACTION:SCROLL|down] or [ACTION:SCROLL|up] to scroll if not visible yet.
+                - Use [ACTION:SCROLL|down] or [ACTION:SCROLL|up] or [ACTION:GLOBAL_NAV|back] to navigate.
+                - Use [ACTION:SOCIAL_ACTION|like/repost/dms/reels|platform] for social feeds.
                 - If the goal is now complete or needs Sir's confirmation before submitting/sending/buying, do NOT emit an action tag and clearly explain what's ready.
             """.trimIndent()
 
@@ -972,10 +1107,27 @@ class JarvisCommandCoordinator(
                         return cleanMsg.ifBlank { "Task completed on screen, Sir." }
                     }
                     val nextCmd = tags.first()
+                    val sig = "$lastPkg|${nextCmd.kind}|${nextCmd.primaryArg}"
+                    if (sig == lastActionSignature) {
+                        repeatedActionCount++
+                        if (repeatedActionCount >= 2) {
+                            _autonomousStepStatus.value = ""
+                            return "I reached a screen loop trying ${nextCmd.kind.name.lowercase()} (${nextCmd.primaryArg}) repeatedly, Sir. Tell me what you'd like me to tap instead."
+                        }
+                    } else {
+                        lastActionSignature = sig
+                        repeatedActionCount = 0
+                    }
+
                     val exec = JarvisSystemAssistant.execute(context, nextCmd)
                     stepLog.add("${nextCmd.kind}:${nextCmd.primaryArg}")
-                    _autonomousStepStatus.value = "Step $step/6: ${exec.actionLabel}"
-                    delay(950L)
+                    _autonomousStepStatus.value = "Step $step/$maxSteps: ${exec.actionLabel}"
+                    if (nextCmd.kind == SystemIntentKind.OPEN_APP && exec.launchedTarget) {
+                        waitForAppForeground(svc, nextCmd.primaryArg, 3600L)
+                        delay(300L)
+                    } else {
+                        delay(850L)
+                    }
                 }
                 else -> {
                     _autonomousStepStatus.value = ""
@@ -995,7 +1147,8 @@ class JarvisCommandCoordinator(
         reply: String,
         toolLabel: String,
         currentSettings: JarvisUserSettings,
-        fromVoice: Boolean
+        fromVoice: Boolean,
+        followUpListen: Boolean = fromVoice
     ) {
         _lastAssistantReply.value = reply
         localRepo.saveMessage(
@@ -1006,9 +1159,9 @@ class JarvisCommandCoordinator(
             toolSummary = toolLabel
         )
         if (currentSettings.voiceOutputEnabled && !voiceEngine.isMuted.value) {
-            voiceEngine.speak(reply, followUpListen = fromVoice)
+            voiceEngine.speak(reply, followUpListen = followUpListen)
         } else {
-            voiceEngine.onCommandHandlingFinished(expectFollowUp = fromVoice)
+            voiceEngine.onCommandHandlingFinished(expectFollowUp = followUpListen)
         }
     }
 
@@ -1109,7 +1262,10 @@ class JarvisCommandCoordinator(
                         awaitingWebsiteLinkFor = null
                         val openRes = JarvisSystemAssistant.openWebsiteInChrome(context, foundUrl)
                         localRepo.logAiActivity("CHROME_OPEN", "Found & opened ${parsed.primaryArg} -> $foundUrl")
-                        if (hasMoreSteps && openRes.launchedTarget) delay(1300L)
+                        if (hasMoreSteps && openRes.launchedTarget) {
+                            waitForAppForeground(JarvisAccessibilityService.activeInstance(), "chrome", 3600L)
+                            delay(300L)
+                        }
                         openRes.replyText to "Chrome Lookup"
                     } else {
                         awaitingWebsiteLinkFor = parsed.primaryArg
@@ -1119,7 +1275,7 @@ class JarvisCommandCoordinator(
                 SystemIntentKind.GUIDE_SCREEN -> {
                     val svc = JarvisAccessibilityService.activeInstance()
                     if (svc == null) {
-                        "Turn on Screen Helper on Home or in Settings first, Sir, so I can read the screen and guide you step by step (like ID uploads, forms, or trading screens)." to "Screen Helper Needed"
+                        "Turn on Screen Helper on Home or Settings first, Sir, so I can read the screen and guide you step by step (like ID uploads, forms, or trading screens)." to "Screen Helper Needed"
                     } else {
                         val guidance = svc.analyzeCurrentFlowStep()
                         if (guidance.stepKind == "GENERAL_SCREEN" && commands.size == 1 && !prompt.lowercase(Locale.US).contains("next step")) {
@@ -1149,9 +1305,11 @@ class JarvisCommandCoordinator(
                             deviceLearningEngine.recordAppInteraction(parsed.primaryArg)
                         }
                         if (hasMoreSteps && exec.launchedTarget &&
-                            parsed.kind in setOf(SystemIntentKind.OPEN_APP, SystemIntentKind.OPEN_URL, SystemIntentKind.PLATFORM_SEARCH)
+                            parsed.kind in setOf(SystemIntentKind.OPEN_APP, SystemIntentKind.OPEN_URL, SystemIntentKind.PLATFORM_SEARCH, SystemIntentKind.WEB_SEARCH)
                         ) {
-                            delay(1300L)
+                            val waitTarget = if (parsed.kind == SystemIntentKind.OPEN_APP) parsed.primaryArg else "chrome"
+                            waitForAppForeground(JarvisAccessibilityService.activeInstance(), waitTarget, 3800L)
+                            delay(320L)
                         }
                         exec.replyText to exec.actionLabel
                     }

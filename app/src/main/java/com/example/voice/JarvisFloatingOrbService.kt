@@ -61,7 +61,9 @@ class JarvisFloatingOrbService : Service() {
     private var bubbleCard: LinearLayout? = null
     private var statusTitleView: TextView? = null
     private var speakerPillView: TextView? = null
+    private var userPromptView: TextView? = null
     private var replyBodyView: TextView? = null
+    private var confirmRowView: LinearLayout? = null
     private var micActionBtn: Button? = null
     private var muteActionBtn: Button? = null
     private var layoutParams: WindowManager.LayoutParams? = null
@@ -258,18 +260,52 @@ class JarvisFloatingOrbService : Service() {
         val scroll = ScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(92)
+                dp(96)
             ).apply {
                 topMargin = dp(4)
                 bottomMargin = dp(6)
             }
+        }
+        val transcriptStack = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val userTv = TextView(this).apply {
+            text = ""
+            setTextColor(Color.rgb(125, 211, 252))
+            textSize = 11.5f
+            setPadding(0, 0, 0, dp(3))
+            visibility = View.GONE
         }
         val bodyTv = TextView(this).apply {
             text = "Listening for you, Sir — speak naturally anytime."
             setTextColor(Color.rgb(238, 244, 255))
             textSize = 13f
         }
-        scroll.addView(bodyTv)
+        transcriptStack.addView(userTv)
+        transcriptStack.addView(bodyTv)
+        scroll.addView(transcriptStack)
+
+        val confirmRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = dp(6)
+            }
+            visibility = View.GONE
+        }
+        val confirmSendBtn = createMiniButton("Send", bgColor = Color.argb(225, 16, 185, 129)) {
+            app.commandCoordinator.orbLifecycle.touchActivity()
+            app.commandCoordinator.submitQuery("Yes, send it", fromVoice = false)
+        }
+        val confirmCancelBtn = createMiniButton("Cancel", bgColor = Color.argb(215, 190, 38, 56)) {
+            app.commandCoordinator.orbLifecycle.touchActivity()
+            app.commandCoordinator.submitQuery("Cancel", fromVoice = false)
+        }
+        confirmRow.addView(confirmSendBtn)
+        confirmRow.addView(confirmCancelBtn)
 
         val actionsRowPrimary = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -344,6 +380,7 @@ class JarvisFloatingOrbService : Service() {
         card.addView(headerRow)
         card.addView(speakerTv)
         card.addView(scroll)
+        card.addView(confirmRow)
         card.addView(actionsRowPrimary)
         card.addView(actionsRowSecondary)
 
@@ -355,7 +392,9 @@ class JarvisFloatingOrbService : Service() {
         bubbleCard = card
         statusTitleView = titleTv
         speakerPillView = speakerTv
+        userPromptView = userTv
         replyBodyView = bodyTv
+        confirmRowView = confirmRow
         micActionBtn = speakBtn
         muteActionBtn = muteBtn
 
@@ -391,8 +430,13 @@ class JarvisFloatingOrbService : Service() {
                 LifecycleSnapshot(wakeFlash, termFlash, expanded)
             }
 
-            combine(voiceBundle, coordinatorBundle, lifecycleBundle) { v, c, l ->
-                OverlayStateSnapshot(v, c, l)
+            combine(
+                voiceBundle,
+                coordinatorBundle,
+                lifecycleBundle,
+                app.commandCoordinator.lastUserPrompt
+            ) { v, c, l, lastPrompt ->
+                OverlayStateSnapshot(v, c.copy(lastUserPrompt = lastPrompt), l)
             }.collectLatest { snap ->
                 val v = snap.voice
                 val c = snap.coordinator
@@ -468,10 +512,26 @@ class JarvisFloatingOrbService : Service() {
                 }
                 muteBtn.text = if (v.isMuted) "Unmute" else "Mute"
 
-                bodyTv.text = when {
-                    v.partial.isNotBlank() -> "\"${v.partial}\""
-                    c.processing && c.streaming.isNotBlank() -> c.streaming
-                    else -> c.lastReply
+                val showConfirmPills = !c.pendingConfirmationSummary.isNullOrBlank() &&
+                    c.pendingConfirmationSummary.startsWith("Send ", ignoreCase = true)
+                confirmRow.visibility = if (showConfirmPills) View.VISIBLE else View.GONE
+
+                val userLine = when {
+                    v.partial.isNotBlank() -> "You: \"${v.partial}\""
+                    c.lastUserPrompt.isNotBlank() -> "You: \"${c.lastUserPrompt}\""
+                    else -> ""
+                }
+                if (userLine.isNotBlank()) {
+                    userTv.visibility = View.VISIBLE
+                    userTv.text = userLine
+                } else {
+                    userTv.visibility = View.GONE
+                }
+
+                bodyTv.text = if (c.processing && c.streaming.isNotBlank()) {
+                    c.streaming
+                } else {
+                    c.lastReply
                 }
             }
         }
@@ -530,7 +590,8 @@ class JarvisFloatingOrbService : Service() {
         val streaming: String,
         val lastReply: String,
         val taskProgress: TaskExecutionProgress,
-        val pendingConfirmationSummary: String?
+        val pendingConfirmationSummary: String?,
+        val lastUserPrompt: String = ""
     )
 
     private data class LifecycleSnapshot(

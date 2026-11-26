@@ -119,6 +119,8 @@ class JarvisVoiceEngine(
     private var lastActiveCommandEnteredAtMs = 0L
     @Volatile
     private var userFacingActive = false
+    @Volatile
+    private var followUpDirectTryActive = false
 
     @Volatile
     private var activeAudioTrack: AudioTrack? = null
@@ -337,6 +339,7 @@ class JarvisVoiceEngine(
         interruptSpeech()
         stopContinuousStandbyMonitor()
         continuousSession = keepConversationLoop
+        followUpDirectTryActive = false
         _phase.value = VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
         lastActiveCommandEnteredAtMs = System.currentTimeMillis()
         _statusDetail.value = "Listening, Sir..."
@@ -350,15 +353,31 @@ class JarvisVoiceEngine(
             return
         }
         if (alwaysOnEnabled) {
-            _phase.value = VoicePipelinePhase.WAKE_WORD_STANDBY
-            continuousSession = expectFollowUp
-            _statusDetail.value = "Always listening for \"Hey JARVIS\""
-            startContinuousStandbyMonitor()
+            if (!pipeAudioSupported && expectFollowUp && (userFacingActive || continuousSession)) {
+                continuousSession = true
+                followUpDirectTryActive = true
+                _phase.value = VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
+                lastActiveCommandEnteredAtMs = System.currentTimeMillis()
+                _statusDetail.value = "Listening for follow-up, Sir..."
+                scheduleNextListen(80L)
+            } else {
+                followUpDirectTryActive = false
+                _phase.value = VoicePipelinePhase.WAKE_WORD_STANDBY
+                continuousSession = expectFollowUp
+                _statusDetail.value = if (expectFollowUp) {
+                    "Listening for follow-up, Sir..."
+                } else {
+                    "Always listening for \"Hey JARVIS\""
+                }
+                startContinuousStandbyMonitor()
+            }
         } else if (expectFollowUp && continuousSession) {
+            followUpDirectTryActive = true
             _phase.value = VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
             lastActiveCommandEnteredAtMs = System.currentTimeMillis()
             scheduleNextListen(80L)
         } else {
+            followUpDirectTryActive = false
             _phase.value = VoicePipelinePhase.STOPPED
             _statusDetail.value = "Voice standby"
         }
@@ -542,6 +561,7 @@ class JarvisVoiceEngine(
     fun stopAllListening() {
         alwaysOnEnabled = false
         continuousSession = false
+        followUpDirectTryActive = false
         watchdogJob?.cancel()
         watchdogJob = null
         stopContinuousStandbyMonitor()
@@ -936,25 +956,40 @@ class JarvisVoiceEngine(
         mainHandler.post {
             abandonAudioFocus()
             if (_isMuted.value) {
+                followUpDirectTryActive = false
                 _phase.value = VoicePipelinePhase.STOPPED
                 _statusDetail.value = "Microphone muted"
             } else if (alwaysOnEnabled) {
-                // Keep continuous silent AudioRecord standby hot with zero mic chimes/pauses;
-                // continuousSession stays true briefly on follow-up so direct replies work everywhere
-                continuousSession = followUpListen
-                _phase.value = VoicePipelinePhase.WAKE_WORD_STANDBY
-                _statusDetail.value = if (followUpListen) {
-                    "Listening for follow-up, Sir..."
+                if (!pipeAudioSupported && followUpListen && (userFacingActive || continuousSession)) {
+                    // On devices without AudioRecord->SpeechRecognizer piping, go straight into
+                    // follow-up capture without risking a 250ms VAD handoff that clips short replies ("Yes"/"Send").
+                    continuousSession = true
+                    followUpDirectTryActive = true
+                    _phase.value = VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
+                    lastActiveCommandEnteredAtMs = System.currentTimeMillis()
+                    _statusDetail.value = "Listening for follow-up, Sir..."
+                    scheduleNextListen(80L)
                 } else {
-                    "Always listening for \"Hey JARVIS\""
+                    followUpDirectTryActive = false
+                    // Keep continuous silent AudioRecord standby hot with zero mic chimes/pauses;
+                    // continuousSession stays true briefly on follow-up so direct replies work everywhere
+                    continuousSession = followUpListen
+                    _phase.value = VoicePipelinePhase.WAKE_WORD_STANDBY
+                    _statusDetail.value = if (followUpListen) {
+                        "Listening for follow-up, Sir..."
+                    } else {
+                        "Always listening for \"Hey JARVIS\""
+                    }
+                    startContinuousStandbyMonitor()
                 }
-                startContinuousStandbyMonitor()
             } else if (followUpListen && continuousSession) {
+                followUpDirectTryActive = true
                 _phase.value = VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
                 lastActiveCommandEnteredAtMs = System.currentTimeMillis()
                 _statusDetail.value = "Listening for follow-up, Sir..."
                 scheduleNextListen(80L)
             } else {
+                followUpDirectTryActive = false
                 _phase.value = VoicePipelinePhase.STOPPED
                 _statusDetail.value = "Voice standby"
             }
@@ -1177,6 +1212,12 @@ class JarvisVoiceEngine(
                     }
 
                     if (alwaysOnEnabled && !_isMuted.value && _phase.value != VoicePipelinePhase.SPEAKING_RESPONSE) {
+                        val wasFollowUpSilence = followUpDirectTryActive &&
+                            (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT)
+                        followUpDirectTryActive = false
+                        if (wasFollowUpSilence) {
+                            continuousSession = false
+                        }
                         if (error == SpeechRecognizer.ERROR_CLIENT ||
                             error == SpeechRecognizer.ERROR_AUDIO ||
                             error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY
@@ -1190,6 +1231,7 @@ class JarvisVoiceEngine(
                         _statusDetail.value = "Always listening for \"Hey JARVIS\""
                         startContinuousStandbyMonitor()
                     } else if (!alwaysOnEnabled) {
+                        followUpDirectTryActive = false
                         continuousSession = false
                         _phase.value = VoicePipelinePhase.STOPPED
                         _statusDetail.value = mapRecognizerError(error)
@@ -1197,6 +1239,7 @@ class JarvisVoiceEngine(
                 }
 
                 override fun onResults(results: Bundle?) {
+                    followUpDirectTryActive = false
                     isRecognizerListening = false
                     currentRecognizerIsPipe = false
                     isPipeSessionActive = false
@@ -1568,6 +1611,7 @@ class JarvisVoiceEngine(
 
     private fun handleRecognizedText(text: String, isFinal: Boolean) {
         if (!isFinal || _isMuted.value) return
+        followUpDirectTryActive = false
         _partialTranscript.value = ""
 
         if (text.isBlank()) {

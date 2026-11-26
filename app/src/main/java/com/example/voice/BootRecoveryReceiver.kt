@@ -23,7 +23,8 @@ class BootRecoveryReceiver : BroadcastReceiver() {
         val action = intent?.action ?: return
         if (action != Intent.ACTION_BOOT_COMPLETED &&
             action != Intent.ACTION_MY_PACKAGE_REPLACED &&
-            action != "android.intent.action.QUICKBOOT_POWERON"
+            action != "android.intent.action.QUICKBOOT_POWERON" &&
+            action != ACTION_RESTART_LISTENER
         ) {
             return
         }
@@ -47,5 +48,9 @@ class BootRecoveryReceiver : BroadcastReceiver() {
                 pendingResult.finish()
             }
         }
+    }
+
+    companion object {
+        const val ACTION_RESTART_LISTENER = "com.example.voice.ACTION_RESTART_LISTENER"
     }
 }

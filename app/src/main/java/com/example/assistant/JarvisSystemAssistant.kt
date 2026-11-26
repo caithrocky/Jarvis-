@@ -1,5 +1,7 @@
 package com.example.assistant
 
+import android.app.ActivityOptions
+import android.app.PendingIntent
 import android.app.SearchManager
 import android.content.Context
 import android.content.Intent
@@ -284,7 +286,7 @@ object JarvisSystemAssistant {
     }
 
     private val compoundActionLeadRegex = Regex(
-        "^(?:please\\s+)?(?:open|launch|start|run|go\\s+to|visit|sign|log|fill|autofill|auto-fill|enter|use|type|write|search|find|look\\s+up|tap|click|press|scroll|swipe|guide|read|set|enable|turn|show|close|hide|minimize|like|love|repost|retweet|share|save|bookmark|follow|subscribe|next|text|message|dm|study|check|verify)\\b",
+        "^(?:please\\s+)?(?:open|launch|start|run|go\\s+to|visit|sign|log|fill|autofill|auto-fill|enter|use|type|write|search|find|look\\s+up|tap|click|press|scroll|swipe|guide|read|set|enable|turn|show|close|hide|minimize|like|love|repost|retweet|share|save|bookmark|follow|subscribe|next|text|message|dm|send\\s+(?:a\\s+)?(?:text|message|dm)|study|check|verify)\\b",
         RegexOption.IGNORE_CASE
     )
 
@@ -300,9 +302,42 @@ object JarvisSystemAssistant {
         )
         val rawSegments = trimmed.split(separatorRegex).map { it.trim() }.filter { it.isNotBlank() }
         if (rawSegments.size in 2..4 && rawSegments.all { compoundActionLeadRegex.containsMatchIn(it) }) {
-            val parsedList = rawSegments.mapNotNull { parseCommand(it) }
+            var activeMessagingPlatform: String? = null
+            var activeSocialPlatform: String? = null
+            var activeBrowser = false
+            var activeOpenedApp: String? = null
+            val parsedList = mutableListOf<ParsedSystemCommand>()
+
+            for (seg in rawSegments) {
+                val segLower = seg.lowercase(Locale.US)
+                val parsed = parseCommandWithContext(
+                    seg = seg,
+                    segLower = segLower,
+                    inheritedMessagingPlatform = activeMessagingPlatform,
+                    inheritedSocialPlatform = activeSocialPlatform,
+                    inheritedBrowser = activeBrowser,
+                    inheritedApp = activeOpenedApp
+                ) ?: break
+
+                when (parsed.kind) {
+                    SystemIntentKind.OPEN_APP -> {
+                        val appLower = parsed.primaryArg.lowercase(Locale.US).trim()
+                        activeOpenedApp = parsed.primaryArg
+                        if (appLower in browserTargetNames) {
+                            activeBrowser = true
+                        }
+                        messagingPlatformNames[appLower]?.let { activeMessagingPlatform = it }
+                        if (appLower in socialPlatformNames) {
+                            activeSocialPlatform = canonicalSocialPlatformName(appLower)
+                        }
+                    }
+                    else -> Unit
+                }
+                parsedList.add(parsed)
+            }
+
             if (parsedList.size == rawSegments.size) {
-                // Propagate context when user says e.g. "open github and sign me in" vs "open chrome and sign me in"
+                // Propagate context & collapse redundant prefix OPEN_APP steps when the next action opens the target directly
                 val refined = mutableListOf<ParsedSystemCommand>()
                 var pendingSiteTarget: String? = null
                 for (cmd in parsedList) {
@@ -319,9 +354,37 @@ object JarvisSystemAssistant {
                             val carried = if ((targetArg.isBlank() || targetArg == "autofill") && pendingSiteTarget != null) {
                                 pendingSiteTarget
                             } else cmd.primaryArg
-                            // If we have a known web login/signup target and previously queued OPEN_APP on a site name,
-                            // avoid fighting between two app launches if it's a web-only service; keep OPEN_APP if browser ("Chrome").
                             refined.add(cmd.copy(primaryArg = carried))
+                        }
+                        SystemIntentKind.TEXT_CONTACT -> {
+                            val prev = refined.lastOrNull()
+                            if (prev?.kind == SystemIntentKind.OPEN_APP) {
+                                val prevPlat = messagingPlatformNames[prev.primaryArg.lowercase(Locale.US)]
+                                    ?: prev.primaryArg
+                                if (prevPlat.equals(cmd.primaryArg, ignoreCase = true)) {
+                                    refined.removeAt(refined.lastIndex)
+                                }
+                            }
+                            refined.add(cmd)
+                        }
+                        SystemIntentKind.OPEN_URL, SystemIntentKind.OPEN_UNKNOWN_WEBSITE, SystemIntentKind.WEB_SEARCH -> {
+                            val prev = refined.lastOrNull()
+                            if (prev?.kind == SystemIntentKind.OPEN_APP &&
+                                prev.primaryArg.lowercase(Locale.US) in browserTargetNames
+                            ) {
+                                refined.removeAt(refined.lastIndex)
+                            }
+                            refined.add(cmd)
+                        }
+                        SystemIntentKind.SOCIAL_ACTION -> {
+                            val prev = refined.lastOrNull()
+                            if (prev?.kind == SystemIntentKind.OPEN_APP && cmd.secondaryArg.isBlank()) {
+                                val socialName = canonicalSocialPlatformName(prev.primaryArg.lowercase(Locale.US))
+                                refined.removeAt(refined.lastIndex)
+                                refined.add(cmd.copy(secondaryArg = socialName))
+                            } else {
+                                refined.add(cmd)
+                            }
                         }
                         else -> refined.add(cmd)
                     }
@@ -331,6 +394,60 @@ object JarvisSystemAssistant {
         }
 
         return listOfNotNull(parseCommand(trimmed))
+    }
+
+    private fun parseCommandWithContext(
+        seg: String,
+        segLower: String,
+        inheritedMessagingPlatform: String?,
+        inheritedSocialPlatform: String?,
+        inheritedBrowser: Boolean,
+        inheritedApp: String?
+    ): ParsedSystemCommand? {
+        parseCommand(seg)?.let { direct ->
+            if (direct.kind == SystemIntentKind.SOCIAL_ACTION && direct.secondaryArg.isBlank() && !inheritedSocialPlatform.isNullOrBlank()) {
+                return direct.copy(secondaryArg = inheritedSocialPlatform)
+            }
+            return direct
+        }
+
+        if (inheritedMessagingPlatform != null) {
+            parseTextContactCommand(seg, defaultPlatform = inheritedMessagingPlatform)?.let { return it }
+        }
+
+        // Handle "search [for] <query>" right after "open <app/chrome>"
+        val genericSearch = Regex(
+            "^(?:please\\s+)?(?:search(?:\\s+for)?|look\\s+up|find)\\s+(.+)$",
+            RegexOption.IGNORE_CASE
+        ).find(seg)?.groupValues?.get(1)?.trim()
+        if (!genericSearch.isNullOrBlank()) {
+            val appLower = inheritedApp?.lowercase(Locale.US).orEmpty()
+            return when {
+                inheritedBrowser -> ParsedSystemCommand(SystemIntentKind.WEB_SEARCH, genericSearch)
+                appLower in platformKeys -> ParsedSystemCommand(SystemIntentKind.PLATFORM_SEARCH, appLower, genericSearch)
+                !inheritedApp.isNullOrBlank() -> ParsedSystemCommand(SystemIntentKind.SEARCH_IN_APP, genericSearch)
+                else -> ParsedSystemCommand(SystemIntentKind.WEB_SEARCH, genericSearch)
+            }
+        }
+
+        // Handle "scroll <app>" right after "open <app>"
+        if (segLower.startsWith("scroll ") && inheritedSocialPlatform != null) {
+            val dir = if (segLower.contains("up")) "scroll_up" else "scroll_down"
+            return ParsedSystemCommand(SystemIntentKind.SOCIAL_ACTION, dir, inheritedSocialPlatform)
+        }
+
+        return null
+    }
+
+    private fun canonicalSocialPlatformName(lowerName: String): String = when (lowerName.trim()) {
+        "insta", "ig", "instagram" -> "Instagram"
+        "tiktok", "tik tok" -> "TikTok"
+        "youtube", "yt" -> "YouTube"
+        "snap", "snapchat" -> "Snapchat"
+        "fb", "facebook" -> "Facebook"
+        "twitter", "x" -> "X"
+        "linkedin" -> "LinkedIn"
+        else -> lowerName.trim().replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() }
     }
 
     fun parseCommand(rawPrompt: String): ParsedSystemCommand? {
@@ -831,7 +948,11 @@ object JarvisSystemAssistant {
 
         // 13. Open / Launch installed app OR navigate internal JARVIS tab
         val openMatch = Regex("^(?:please\\s+|hey\\s+jarvis[,\\s]+)?(?:open|launch|start|run)\\s+(?:the\\s+)?(.+?)(?:\\s+app)?$", RegexOption.IGNORE_CASE).find(trimmed)
-        if (openMatch != null) {
+        val hasTrailingActionClause = Regex(
+            "\\s+(?:and|then)\\s+(?:text|message|dm|search|find|look|sign|log|fill|scroll|like|repost|share|tap|click|type|write)\\b",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(lower)
+        if (openMatch != null && !hasTrailingActionClause) {
             val target = openMatch.groupValues[1].trim()
             val targetLower = target.lowercase(Locale.US)
             if (targetLower in internalSectionKeywords) {
@@ -858,7 +979,10 @@ object JarvisSystemAssistant {
         return null
     }
 
-    internal fun parseTextContactCommand(trimmed: String): ParsedSystemCommand? {
+    internal fun parseTextContactCommand(
+        trimmed: String,
+        defaultPlatform: String? = null
+    ): ParsedSystemCommand? {
         val platformPattern = "(whatsapp|whats\\s+app|snapchat|snap|instagram|insta|ig|telegram|messenger|facebook\\s+messenger|signal|discord|sms|messages)"
         // Pattern A: "text Alex hey how are you on WhatsApp" or "text Alex on WhatsApp saying hey"
         val afterPlatformRegex = Regex(
@@ -878,56 +1002,83 @@ object JarvisSystemAssistant {
 
         // Pattern B: "on WhatsApp text Alex saying hey"
         val leadPlatformRegex = Regex(
-            "^(?:please\\s+)?(?:on|via|in)\\s+$platformPattern\\s+(?:text|message|dm|send\\s+(?:a\\s+)?message\\s+to)\\s+(.+)$",
+            "^(?:please\\s+)?(?:on|via|in)\\s+$platformPattern\\s+(?:text|message|dm|send\\s+(?:a\\s+)?(?:message|text|dm)\\s+to)\\s+(.+)$",
             RegexOption.IGNORE_CASE
         )
         leadPlatformRegex.find(trimmed)?.let { m ->
             val rawPlatform = m.groupValues[1].trim().lowercase(Locale.US)
             val rest = m.groupValues[2].trim()
             val platform = messagingPlatformNames[rawPlatform] ?: rawPlatform
-            val sayingSplit = rest.split(Regex("\\s+(?:saying|that|:)\\s+", RegexOption.IGNORE_CASE), limit = 2)
-            val contact = sayingSplit[0].trim()
-            val msg = sayingSplit.getOrElse(1) { "" }.trim().trim('"', '\'')
+            val (contact, msg) = splitContactAndInlineMessage(rest, "")
             if (contact.isNotBlank()) {
                 return ParsedSystemCommand(SystemIntentKind.TEXT_CONTACT, platform, "$contact|$msg")
             }
         }
 
-        // Pattern C: "text <Name> saying <Message>" (defaults to Messages/WhatsApp choice in coordinator if ambiguous)
+        // Pattern C: "text <Name> saying <Message>" (explicit message without platform)
         val genericContactSaying = Regex(
-            "^(?:please\\s+)?(?:text|message|dm)\\s+([A-Za-z][A-Za-z0-9._' -]{1,35})\\s+(?:saying|that)\\s+(.+)$",
+            "^(?:please\\s+)?(?:text|message|dm|send\\s+(?:a\\s+)?(?:message|text|dm)\\s+to)\\s+([A-Za-z][A-Za-z0-9._' -]{1,35})\\s+(?:saying|that)\\s+(.+)$",
             RegexOption.IGNORE_CASE
         )
         genericContactSaying.find(trimmed)?.let { m ->
-            val contact = m.groupValues[1].trim()
+            val contact = cleanContactLead(m.groupValues[1])
             val msg = m.groupValues[2].trim().trim('"', '\'')
             if (contact.isNotBlank() && msg.isNotBlank()) {
-                return ParsedSystemCommand(SystemIntentKind.TEXT_CONTACT, "Messages", "$contact|$msg")
+                return ParsedSystemCommand(
+                    SystemIntentKind.TEXT_CONTACT,
+                    defaultPlatform ?: "Messages",
+                    "$contact|$msg"
+                )
+            }
+        }
+
+        // Pattern D: Context-inherited messaging segment (e.g., second half of "open WhatsApp and text Alex [hey]")
+        if (!defaultPlatform.isNullOrBlank()) {
+            val bareTextMatch = Regex(
+                "^(?:please\\s+)?(?:text|message|dm|send\\s+(?:a\\s+)?(?:message|text|dm)\\s+to)\\s+(.+)$",
+                RegexOption.IGNORE_CASE
+            ).find(trimmed)
+            if (bareTextMatch != null) {
+                val (contact, msg) = splitContactAndInlineMessage(bareTextMatch.groupValues[1].trim(), "")
+                if (contact.isNotBlank()) {
+                    return ParsedSystemCommand(SystemIntentKind.TEXT_CONTACT, defaultPlatform, "$contact|$msg")
+                }
             }
         }
 
         return null
     }
 
+    private fun cleanContactLead(raw: String): String {
+        return raw.trim()
+            .replace(Regex("^(?:someone\\s+(?:named|called)\\s+|a\\s+(?:person|contact|friend)\\s+(?:named|called)\\s+|contact\\s+)", RegexOption.IGNORE_CASE), "")
+            .trim('"', '\'', ' ')
+    }
+
+    private val messageStarterHints = setOf(
+        "hey", "hi", "hello", "yo", "sup", "good", "how", "what", "where", "when", "why",
+        "please", "call", "come", "ok", "okay", "thanks", "sorry", "meet", "bro", "i'm", "im"
+    )
+
     private fun splitContactAndInlineMessage(targetAndMaybeMsg: String, trailingMsg: String): Pair<String, String> {
+        val cleanedTarget = cleanContactLead(targetAndMaybeMsg)
         if (trailingMsg.isNotBlank()) {
-            return targetAndMaybeMsg.trim().trim('"', '\'') to trailingMsg
+            return cleanedTarget to trailingMsg
         }
-        val explicitSaying = targetAndMaybeMsg.split(Regex("\\s+(?:saying|that|:)\\s+", RegexOption.IGNORE_CASE), limit = 2)
+        val explicitSaying = cleanedTarget.split(Regex("\\s+(?:saying|that|:)\\s+", RegexOption.IGNORE_CASE), limit = 2)
         if (explicitSaying.size == 2) {
-            return explicitSaying[0].trim() to explicitSaying[1].trim().trim('"', '\'')
+            return cleanContactLead(explicitSaying[0]) to explicitSaying[1].trim().trim('"', '\'')
         }
-        val quoteIdx = targetAndMaybeMsg.indexOfAny(charArrayOf('"', '\''))
+        val quoteIdx = cleanedTarget.indexOfAny(charArrayOf('"', '\''))
         if (quoteIdx > 0) {
-            return targetAndMaybeMsg.substring(0, quoteIdx).trim() to
-                targetAndMaybeMsg.substring(quoteIdx).trim().trim('"', '\'')
+            return cleanContactLead(cleanedTarget.substring(0, quoteIdx)) to
+                cleanedTarget.substring(quoteIdx).trim().trim('"', '\'')
         }
-        val words = targetAndMaybeMsg.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
-        // Heuristic: if 3+ words without separator, first token (or first 2 if single short? use first token when 3+) is contact and remainder is message
-        return if (words.size >= 3) {
-            words.first() to words.drop(1).joinToString(" ")
-        } else {
-            targetAndMaybeMsg.trim() to ""
+        val words = cleanedTarget.split(Regex("\\s+")).filter { it.isNotBlank() }
+        return when {
+            words.size >= 3 -> words.first() to words.drop(1).joinToString(" ")
+            words.size == 2 && words[1].lowercase(Locale.US) in messageStarterHints -> words[0] to words[1]
+            else -> cleanedTarget to ""
         }
     }
 
@@ -1607,26 +1758,26 @@ object JarvisSystemAssistant {
         }
 
         val installedApps = listInstalledLauncherApps(context)
-        val exactMatch = installedApps.firstOrNull { it.appName.equals(cleanQuery, ignoreCase = true) }
-            ?: installedApps.firstOrNull { it.appName.lowercase(Locale.US).startsWith(queryLower) }
-            ?: installedApps.firstOrNull { it.appName.lowercase(Locale.US).contains(queryLower) }
-            ?: installedApps.firstOrNull { queryLower.contains(it.appName.lowercase(Locale.US)) }
 
+        // 1. Exact label match
+        val exactMatch = installedApps.firstOrNull { it.appName.equals(cleanQuery, ignoreCase = true) }
         if (exactMatch != null) {
             pm.getLaunchIntentForPackage(exactMatch.packageName)?.let { intent ->
+                intent.addFlags(Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
                 if (Settings.canDrawOverlays(context)) {
                     JarvisFloatingOrbService.start(context, expandBubble = false)
                 }
                 return launchIntent(
                     context = context,
                     intent = intent,
-                    successReply = "Opening ${exactMatch.appName}, Sir. Tap my glowing mini-orb anytime if you'd like me to analyze the screen or guide your next step.",
-                    failureReply = "I located ${exactMatch.appName}, but Android prevented launching it.",
+                    successReply = "Opening ${exactMatch.appName}, Sir.",
+                    failureReply = "I located ${exactMatch.appName}, but Android prevented opening it from the background. Turn on Screen Helper or Display Over Other Apps.",
                     actionLabel = "App Launch"
                 )
             }
         }
 
+        // 2. Curated package aliases BEFORE fuzzy substring match (so "X" opens X/Twitter, not Netflix/Exness)
         val aliasPackages = knownAppAliases[queryLower].orEmpty()
         for (pkg in aliasPackages) {
             val intent = pm.getLaunchIntentForPackage(pkg)
@@ -1640,6 +1791,7 @@ object JarvisSystemAssistant {
                 } else null
 
             if (intent != null) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
                 if (Settings.canDrawOverlays(context)) {
                     JarvisFloatingOrbService.start(context, expandBubble = false)
                 }
@@ -1651,6 +1803,27 @@ object JarvisSystemAssistant {
                     actionLabel = "App Launch"
                 )
                 if (result.launchedTarget) return result
+            }
+        }
+
+        // 3. Fuzzy installed app label match
+        val fuzzyMatch = installedApps.firstOrNull { it.appName.lowercase(Locale.US).startsWith(queryLower) }
+            ?: installedApps.firstOrNull { queryLower.length >= 3 && it.appName.lowercase(Locale.US).contains(queryLower) }
+            ?: installedApps.firstOrNull { it.appName.length >= 3 && queryLower.contains(it.appName.lowercase(Locale.US)) }
+
+        if (fuzzyMatch != null) {
+            pm.getLaunchIntentForPackage(fuzzyMatch.packageName)?.let { intent ->
+                intent.addFlags(Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+                if (Settings.canDrawOverlays(context)) {
+                    JarvisFloatingOrbService.start(context, expandBubble = false)
+                }
+                return launchIntent(
+                    context = context,
+                    intent = intent,
+                    successReply = "Opening ${fuzzyMatch.appName}, Sir.",
+                    failureReply = "I located ${fuzzyMatch.appName}, but Android prevented launching it from background.",
+                    actionLabel = "App Launch"
+                )
             }
         }
 
@@ -1784,15 +1957,60 @@ object JarvisSystemAssistant {
             )
         }
 
-        // AccessibilityService context is exempt from Android 10-15 Background Activity Launch restrictions
-        val starterContext = if (context is android.app.Activity) {
-            context
-        } else {
-            JarvisAccessibilityService.activeInstance() ?: context
+        val accInstance = JarvisAccessibilityService.activeInstance()
+        // AccessibilityService or an active Activity bypasses Android 10-16 BAL restrictions directly
+        val starterContext = when {
+            context is android.app.Activity -> context
+            accInstance != null -> accInstance
+            else -> context
+        }
+
+        if (starterContext === accInstance || starterContext is android.app.Activity) {
+            val directOk = runCatching {
+                starterContext.startActivity(intent)
+                true
+            }.getOrDefault(false)
+            if (directOk) {
+                return SystemExecutionResult(
+                    handled = true,
+                    replyText = successReply,
+                    actionLabel = actionLabel,
+                    launchedTarget = true
+                )
+            }
+        }
+
+        // On Android 14+ (API 34+) without AccessibilityService, PendingIntent + BAL opt-in honors SYSTEM_ALERT_WINDOW exemption
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && Settings.canDrawOverlays(context)) {
+            val piSent = runCatching {
+                val opts = ActivityOptions.makeBasic().apply {
+                    @Suppress("DEPRECATION")
+                    setPendingIntentBackgroundActivityStartMode(
+                        ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_ALWAYS
+                    )
+                }
+                val reqCode = (System.currentTimeMillis() and 0xFFFF).toInt()
+                val pi = PendingIntent.getActivity(
+                    context,
+                    reqCode,
+                    intent,
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+                pi.send(context, 0, null, null, null, null, opts.toBundle())
+                true
+            }.getOrDefault(false)
+            if (piSent) {
+                return SystemExecutionResult(
+                    handled = true,
+                    replyText = successReply,
+                    actionLabel = actionLabel,
+                    launchedTarget = true
+                )
+            }
         }
 
         return runCatching {
-            starterContext.startActivity(intent)
+            context.startActivity(intent)
             SystemExecutionResult(
                 handled = true,
                 replyText = successReply,
@@ -1800,22 +2018,12 @@ object JarvisSystemAssistant {
                 launchedTarget = true
             )
         }.getOrElse {
-            runCatching {
-                context.startActivity(intent)
-                SystemExecutionResult(
-                    handled = true,
-                    replyText = successReply,
-                    actionLabel = actionLabel,
-                    launchedTarget = true
-                )
-            }.getOrElse {
-                SystemExecutionResult(
-                    handled = failureReply.isNotBlank(),
-                    replyText = failureReply,
-                    actionLabel = actionLabel,
-                    launchedTarget = false
-                )
-            }
+            SystemExecutionResult(
+                handled = failureReply.isNotBlank(),
+                replyText = failureReply,
+                actionLabel = actionLabel,
+                launchedTarget = false
+            )
         }
     }
 }

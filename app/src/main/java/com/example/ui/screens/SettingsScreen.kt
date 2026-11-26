@@ -1,6 +1,9 @@
 package com.example.ui.screens
 
+import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -98,6 +101,10 @@ fun SettingsScreen(
             (info.versionName ?: "1.0") to PackageInfoCompat.getLongVersionCode(info)
         }.getOrDefault("1.0" to 1L)
     }
+    val isBatteryUnrestricted = remember(uiState) {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        pm?.isIgnoringBatteryOptimizations(context.packageName) == true
+    }
 
     var nvidiaKeyInput by remember { mutableStateOf("") }
 
@@ -146,9 +153,31 @@ fun SettingsScreen(
                     actionLabel = if (uiState.hasNotificationAccess) "Connected" else "Enable",
                     onAction = onOpenNotificationAccessSettings
                 )
+                PermissionHealthRow(
+                    label = "Built-In Device Plugin (Closed-App Wake & Orb)",
+                    granted = isBatteryUnrestricted && uiState.isScreenHelperEnabled && uiState.hasOverlayPermission,
+                    actionLabel = if (isBatteryUnrestricted) "Unrestricted" else "Install",
+                    onAction = {
+                        val launched = runCatching {
+                            context.startActivity(
+                                Intent(
+                                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                    Uri.parse("package:${context.packageName}")
+                                )
+                            )
+                            true
+                        }.getOrDefault(false)
+                        if (!launched) {
+                            runCatching {
+                                context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                            }
+                        }
+                    },
+                    testTag = "install_device_plugin_btn"
+                )
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    text = "Boot & Update Auto-Recovery: Active — restores wake-word and daily device study automatically after device reboot or APK update.",
+                    text = "Built-In Plugin & Boot Auto-Recovery: Keeps \"Hey JARVIS\" and Mini Orb auto-launch active even when JARVIS is closed from Recents or after a reboot.",
                     style = MaterialTheme.typography.bodySmall,
                     color = jc.mutedSlate
                 )
@@ -677,7 +706,8 @@ private fun PermissionHealthRow(
     label: String,
     granted: Boolean,
     actionLabel: String,
-    onAction: () -> Unit
+    onAction: () -> Unit,
+    testTag: String? = null
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -692,7 +722,10 @@ private fun PermissionHealthRow(
                 color = if (granted) ProfitEmerald else WarningAmber
             )
         }
-        OutlinedButton(onClick = onAction) {
+        OutlinedButton(
+            onClick = onAction,
+            modifier = if (testTag != null) Modifier.testTag(testTag) else Modifier
+        ) {
             Text(actionLabel)
         }
     }

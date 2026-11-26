@@ -1,16 +1,21 @@
 package com.example.voice
 
+import android.app.AlarmManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
+import android.provider.Settings
 import com.example.JarvisApplication
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class JarvisVoiceService : Service() {
@@ -36,7 +41,7 @@ class JarvisVoiceService : Service() {
 
         val notification = JarvisNotificationHelper.buildVoiceForegroundNotification(
             this,
-            "Say \"Hey JARVIS\" anytime to talk or open the mini-orb"
+            "Say \"Hey JARVIS\" anytime — even when closed"
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
@@ -50,7 +55,44 @@ class JarvisVoiceService : Service() {
 
         app.commandCoordinator.attachVoiceEngineCallbacks()
         app.voiceEngine.startAlwaysOnWakeWordLoop()
+
+        // Ensure Mini Orb overlay daemon stands ready in collapsed standby when app is closed & permission granted
+        serviceScope.launch {
+            val s = runCatching { app.preferencesRepository.settingsFlow.first() }.getOrNull()
+            if (s != null &&
+                s.wakeWordEnabled &&
+                s.floatingOrbEnabled &&
+                !app.commandCoordinator.isAppInForeground &&
+                Settings.canDrawOverlays(this@JarvisVoiceService)
+            ) {
+                runCatching {
+                    JarvisFloatingOrbService.start(this@JarvisVoiceService, expandBubble = false)
+                }
+            }
+        }
         return START_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        val app = application as? JarvisApplication ?: return
+        if (!app.voiceEngine.hasMicPermission() || app.voiceEngine.isMuted.value) return
+
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as? AlarmManager
+        val restartIntent = Intent(applicationContext, BootRecoveryReceiver::class.java).apply {
+            action = BootRecoveryReceiver.ACTION_RESTART_LISTENER
+        }
+        val pi = PendingIntent.getBroadcast(
+            applicationContext,
+            9402,
+            restartIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        alarmManager?.set(
+            AlarmManager.ELAPSED_REALTIME_WAKEUP,
+            SystemClock.elapsedRealtime() + 700L,
+            pi
+        )
     }
 
     override fun onDestroy() {
@@ -68,10 +110,12 @@ class JarvisVoiceService : Service() {
             val intent = Intent(context, JarvisVoiceService::class.java).apply {
                 action = ACTION_START
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
             }
         }
 
@@ -79,7 +123,7 @@ class JarvisVoiceService : Service() {
             val intent = Intent(context, JarvisVoiceService::class.java).apply {
                 action = ACTION_STOP
             }
-            context.startService(intent)
+            runCatching { context.startService(intent) }
         }
     }
 }

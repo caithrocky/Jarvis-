@@ -1,10 +1,12 @@
 package com.example.assistant
 
+import android.Manifest
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Path
 import android.graphics.Rect
@@ -14,10 +16,18 @@ import android.text.InputType
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import androidx.core.content.ContextCompat
+import com.example.JarvisApplication
 import com.example.security.SecureCredentialStore
+import com.example.voice.JarvisVoiceService
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 data class ScreenActionResult(
@@ -53,6 +63,7 @@ data class ContactCandidateMatch(
 class JarvisAccessibilityService : AccessibilityService() {
 
     private var overlayManager: JarvisVisualOverlayManager? = null
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     @Volatile
     private var lastIndexedNodes: List<IndexedUiNode> = emptyList()
@@ -66,6 +77,24 @@ class JarvisAccessibilityService : AccessibilityService() {
             showScrollEnabled = desiredShowScroll
         }
         _isConnected.value = true
+
+        // Built-in OS plugin resilience: ensure always-on wake-word listener runs whenever enabled
+        serviceScope.launch {
+            val app = applicationContext as? JarvisApplication ?: return@launch
+            val settings = runCatching { app.preferencesRepository.settingsFlow.first() }.getOrNull() ?: return@launch
+            applyVisualFeedbackSettings(
+                showTap = settings.showTapIndicator,
+                showHighlight = settings.showHighlightIndicator,
+                showScroll = settings.showScrollIndicator
+            )
+            val hasMic = ContextCompat.checkSelfPermission(
+                applicationContext,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+            if (settings.wakeWordEnabled && hasMic && !app.voiceEngine.isMuted.value) {
+                JarvisVoiceService.start(applicationContext)
+            }
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -308,32 +337,129 @@ class JarvisAccessibilityService : AccessibilityService() {
         }
     }
 
+    fun hasMessageComposeBox(): Boolean {
+        val root = activeAppRootWindow() ?: return false
+        val dm = resources.displayMetrics
+        var found = false
+        traverseNodes(root) { node ->
+            if (!found && node.isEditable && node.isVisibleToUser && !isBrowserAddressBar(node)) {
+                val sig = nodeSignature(node)
+                val r = Rect().also { node.getBoundsInScreen(it) }
+                val looksLikeSearch = sig.contains("search") || sig.contains("find") || sig.contains("meta ai")
+                val looksLikeCompose = sig.contains("message") || sig.contains("chat") || sig.contains("entry") ||
+                    sig.contains("reply") || r.top > dm.heightPixels * 0.45f
+                if (!looksLikeSearch && looksLikeCompose) {
+                    found = true
+                }
+            }
+        }
+        return found
+    }
+
+    /**
+     * Prepares messaging/social apps before searching for a contact (e.g., opens Instagram DMs,
+     * switches Snapchat to Chat tab, or exits a previously open chat on WhatsApp/Telegram).
+     */
+    fun navigateMessagingAppToSearchArea(platform: String): Boolean {
+        val root = activeAppRootWindow() ?: return false
+        val pkgLower = root.packageName?.toString()?.lowercase(Locale.US).orEmpty()
+        val platLower = platform.lowercase(Locale.US)
+
+        // If a chat compose box is already open at the bottom, navigate back once so search starts cleanly from Inbox/Chats
+        val composeOpen = hasMessageComposeBox()
+        val hasOpenSearchEdit = run {
+            var found = false
+            traverseNodes(root) { n ->
+                if (!found && n.isEditable && n.isVisibleToUser && nodeSignature(n).contains("search")) {
+                    found = true
+                }
+            }
+            found
+        }
+        if (hasOpenSearchEdit) return false
+
+        if (platLower.contains("instagram") || pkgLower.contains("instagram")) {
+            val dmIcon = findClickableNodeByKeywords(
+                root,
+                listOf("action_bar_inbox_button", "direct_tab", "direct", "messenger", "messages", "inbox")
+            )
+            if (dmIcon != null && !composeOpen) {
+                val r = Rect().also { dmIcon.getBoundsInScreen(it) }
+                if (r.top < resources.displayMetrics.heightPixels * 0.22f) {
+                    tapBoundsCenter(r, "Instagram DMs")
+                    return true
+                }
+            }
+        }
+
+        if (platLower.contains("snapchat") || pkgLower.contains("snapchat")) {
+            val chatTab = findClickableNodeByKeywords(
+                root,
+                listOf("chat_tab", "chat", "messages", "friends")
+            )
+            if (chatTab != null && !composeOpen) {
+                val r = Rect().also { chatTab.getBoundsInScreen(it) }
+                if (r.bottom > resources.displayMetrics.heightPixels * 0.78f) {
+                    tapBoundsCenter(r, "Snapchat Chat")
+                    return true
+                }
+            }
+        }
+
+        if (composeOpen) {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            return true
+        }
+        return false
+    }
+
     /**
      * Locates an in-app Search bar or Search icon button, opens it if needed, and enters the query.
+     * Strictly avoids tapping Meta AI / AI Assistant buttons on WhatsApp/Instagram.
      */
     fun findAndTapSearchAndType(queryText: String): ScreenActionResult {
         val root = activeAppRootWindow()
             ?: return ScreenActionResult(false, "I cannot see the active app window right now, Sir.")
 
         val editables = mutableListOf<AccessibilityNodeInfo>()
-        val searchTriggers = mutableListOf<AccessibilityNodeInfo>()
+        val dedicatedSearchTriggers = mutableListOf<AccessibilityNodeInfo>()
+        val newChatTriggers = mutableListOf<AccessibilityNodeInfo>()
+        val fallbackSearchTriggers = mutableListOf<AccessibilityNodeInfo>()
 
         traverseNodes(root) { node ->
             if (!node.isVisibleToUser) return@traverseNodes
             val sig = nodeSignature(node)
-            if (node.isEditable) {
+            val isMetaAiOnly = (sig.contains("meta ai") || sig.contains("meta_ai") || sig.contains("ai studio") || sig.contains("ask meta")) &&
+                !sig.contains("search")
+            if (isMetaAiOnly) return@traverseNodes
+
+            if (node.isEditable && !isBrowserAddressBar(node)) {
                 editables.add(node)
-            } else if (
-                node.isClickable &&
-                (sig.contains("search") || sig.contains("find") || sig.contains("meta ai") ||
-                    sig.contains("menu_search") || sig.contains("search_button") || sig.contains("chat_search"))
-            ) {
-                searchTriggers.add(node)
+            } else if (node.isClickable || !node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank()) {
+                when {
+                    sig.contains("menuitem_search") ||
+                        sig.contains("search_button") ||
+                        sig.contains("search_btn") ||
+                        sig.contains("chat_search") ||
+                        sig.contains("search_bar") ||
+                        sig.contains("action_search") ||
+                        sig.contains("search_src_text") -> dedicatedSearchTriggers.add(node)
+                    sig.contains("new chat") || sig.contains("new_chat") || sig.contains("start chat") || sig.contains("fab") ->
+                        newChatTriggers.add(node)
+                    sig.contains("search") && !sig.contains("meta ai") && !sig.contains("ask meta") ->
+                        dedicatedSearchTriggers.add(node)
+                    sig.contains("search") ->
+                        fallbackSearchTriggers.add(node)
+                }
             }
         }
 
-        // Prefer an editable box already labeled search
-        val activeSearchEdit = editables.firstOrNull { nodeSignature(it).contains("search") }
+        // 1. Prefer an editable search/recipient box already active & visible
+        val activeSearchEdit = editables.firstOrNull {
+            val s = nodeSignature(it)
+            (s.contains("search") || s.contains("filter") || s.contains("find") || s.contains("to")) &&
+                !s.contains("meta ai")
+        }
         if (activeSearchEdit != null) {
             val rect = Rect().also { activeSearchEdit.getBoundsInScreen(it) }
             overlayManager?.showHighlightBoxes(listOf(HighlightTarget(rect, label = "Search")), 2000L)
@@ -342,20 +468,46 @@ class JarvisAccessibilityService : AccessibilityService() {
             return ScreenActionResult(ok, if (ok) "Searching for $queryText, Sir." else "Could not type into search box.", rect)
         }
 
-        // Otherwise tap the app's search icon / bar trigger first
-        val trigger = searchTriggers.firstOrNull()
-        if (trigger != null) {
-            val rect = Rect().also { trigger.getBoundsInScreen(it) }
+        // 2. Tap a pure search icon / bar (never Meta AI)
+        val pureTrigger = dedicatedSearchTriggers.firstOrNull { findClickableAncestorBounds(it) != null || it.isClickable }
+        if (pureTrigger != null) {
+            val rect = findClickableAncestorBounds(pureTrigger) ?: Rect().also { pureTrigger.getBoundsInScreen(it) }
             tapBoundsCenter(rect, "Search")
             return ScreenActionResult(false, "Opened search bar, waiting to type query.", rect)
         }
 
-        // Last resort: check any visible node containing "Search"
-        val fallbackSearch = editables.firstOrNull()
-        if (fallbackSearch != null) {
-            val rect = Rect().also { fallbackSearch.getBoundsInScreen(it) }
-            val ok = writeTextIntoNode(fallbackSearch, queryText)
-            return ScreenActionResult(ok, if (ok) "Entered $queryText into field, Sir." else "Failed typing $queryText.", rect)
+        // 3. Fallback: tap "New chat" / "Start chat" FAB if search bar isn't clean (e.g. WhatsApp Meta AI top bar)
+        val newChatTrigger = newChatTriggers.firstOrNull { findClickableAncestorBounds(it) != null || it.isClickable }
+        if (newChatTrigger != null) {
+            val rect = findClickableAncestorBounds(newChatTrigger) ?: Rect().also { newChatTrigger.getBoundsInScreen(it) }
+            tapBoundsCenter(rect, "New Chat")
+            return ScreenActionResult(false, "Opened New Chat contact picker, waiting for search.", rect)
+        }
+
+        // 4. Last-resort compound search bar (e.g. "Ask Meta AI or Search") — tap the right/search portion carefully
+        val compoundBar = fallbackSearchTriggers.firstOrNull { findClickableAncestorBounds(it) != null || it.isClickable }
+        if (compoundBar != null) {
+            val fullRect = findClickableAncestorBounds(compoundBar) ?: Rect().also { compoundBar.getBoundsInScreen(it) }
+            // Tap slightly right of center so we hit "Search" rather than a left-side Meta AI ring
+            val searchTapRect = Rect(
+                (fullRect.left + fullRect.width() * 0.52f).toInt(),
+                fullRect.top,
+                fullRect.right,
+                fullRect.bottom
+            )
+            tapBoundsCenter(searchTapRect, "Search")
+            return ScreenActionResult(false, "Opened search bar, waiting to type query.", searchTapRect)
+        }
+
+        // 5. Fallback any visible top editable box that isn't bottom chat compose
+        val topEdit = editables.firstOrNull { node ->
+            val r = Rect().also { node.getBoundsInScreen(it) }
+            r.top < resources.displayMetrics.heightPixels * 0.45f
+        }
+        if (topEdit != null) {
+            val rect = Rect().also { topEdit.getBoundsInScreen(it) }
+            val ok = writeTextIntoNode(topEdit, queryText)
+            return ScreenActionResult(ok, if (ok) "Entered $queryText into search field, Sir." else "Failed typing $queryText.", rect)
         }
 
         return ScreenActionResult(false, "No search bar visible on this screen yet, Sir.")
@@ -370,10 +522,10 @@ class JarvisAccessibilityService : AccessibilityService() {
         val tokens = queryLower.split(Regex("\\s+")).filter { it.length >= 2 }
         if (tokens.isEmpty()) return emptyList()
 
-        val matches = mutableListOf<ContactCandidateMatch>()
+        val scoredMatches = mutableListOf<Pair<Int, ContactCandidateMatch>>()
         val seenRows = mutableSetOf<Int>()
         val dm = resources.displayMetrics
-        val topHeaderCutoff = (dm.heightPixels * 0.14f).toInt()
+        val topHeaderCutoff = (dm.heightPixels * 0.12f).toInt()
 
         traverseNodes(root) { node ->
             if (!node.isVisibleToUser || node.isEditable) return@traverseNodes
@@ -383,37 +535,57 @@ class JarvisAccessibilityService : AccessibilityService() {
             if (candidateLabel.isBlank() || candidateLabel.length > 70) return@traverseNodes
 
             val lower = candidateLabel.lowercase(Locale.US)
-            if (lower == "search" || lower.contains("ask meta ai") || lower == queryLower && node.isFocused) return@traverseNodes
+            if (lower == "search" ||
+                lower == "new chat" ||
+                lower == "chats" ||
+                lower == "contacts" ||
+                lower.contains("ask meta ai") ||
+                (lower == queryLower && node.isFocused)
+            ) {
+                return@traverseNodes
+            }
 
-            val hits = tokens.all { lower.contains(it) } || lower.contains(queryLower)
-            if (!hits) return@traverseNodes
+            val exact = lower == queryLower
+            val starts = lower.startsWith(queryLower)
+            val allTokens = tokens.all { lower.contains(it) } || lower.contains(queryLower)
+            if (!allTokens) return@traverseNodes
 
             val rect = Rect()
             node.getBoundsInScreen(rect)
             if (rect.top < topHeaderCutoff && isInsideSearchArea(node)) return@traverseNodes
             if (rect.width() <= 10 || rect.height() <= 10) return@traverseNodes
 
-            // Expand clickable row ancestor bounds if available for cleaner visual highlighting
-            val rowBounds = findClickableAncestorBounds(node) ?: rect
-            val rowBucket = rowBounds.centerY() / 48
+            val clickableRow = findClickableAncestorBounds(node, maxDepth = 7)
+                ?: if (node.isClickable) rect else return@traverseNodes
+            val rowBucket = clickableRow.centerY() / 44
             if (!seenRows.add(rowBucket)) return@traverseNodes
 
-            matches.add(
-                ContactCandidateMatch(
-                    index = matches.size + 1,
+            val score = when {
+                exact -> 0
+                starts -> 1
+                else -> 2
+            }
+            scoredMatches.add(
+                score to ContactCandidateMatch(
+                    index = 0,
                     displayName = candidateLabel,
                     subText = "",
-                    bounds = rowBounds
+                    bounds = clickableRow
                 )
             )
         }
-        return matches.take(6)
+
+        return scoredMatches
+            .sortedWith(compareBy<Pair<Int, ContactCandidateMatch>> { it.first }.thenBy { it.second.bounds.top })
+            .take(6)
+            .mapIndexed { idx, (_, m) -> m.copy(index = idx + 1) }
     }
 
     fun findMessageComposeAndType(messageText: String): ScreenActionResult {
         val root = activeAppRootWindow()
             ?: return ScreenActionResult(false, "No active chat window visible, Sir.")
 
+        val dm = resources.displayMetrics
         val editables = mutableListOf<AccessibilityNodeInfo>()
         traverseNodes(root) { node ->
             if (node.isEditable && node.isVisibleToUser && !isBrowserAddressBar(node)) {
@@ -423,8 +595,13 @@ class JarvisAccessibilityService : AccessibilityService() {
 
         val composeNode = editables.firstOrNull { node ->
             val sig = nodeSignature(node)
-            sig.contains("message") || sig.contains("chat") || sig.contains("reply") ||
-                sig.contains("write") || sig.contains("entry") || sig.contains("caption")
+            !sig.contains("search") && (
+                sig.contains("message") || sig.contains("chat") || sig.contains("reply") ||
+                    sig.contains("write") || sig.contains("entry") || sig.contains("caption")
+                )
+        } ?: editables.lastOrNull { node ->
+            val r = Rect().also { node.getBoundsInScreen(it) }
+            r.top > dm.heightPixels * 0.42f && !nodeSignature(node).contains("search")
         } ?: editables.lastOrNull()
             ?: return ScreenActionResult(false, "No message box is open on this screen yet, Sir.")
 
@@ -441,15 +618,22 @@ class JarvisAccessibilityService : AccessibilityService() {
 
     fun findSendButtonBounds(): Rect? {
         val root = activeAppRootWindow() ?: return null
+        val dm = resources.displayMetrics
         var bestRect: Rect? = null
         traverseNodes(root) { node ->
-            if (bestRect == null && node.isClickable && node.isVisibleToUser) {
+            if (node.isClickable && node.isVisibleToUser) {
                 val sig = nodeSignature(node)
-                if (sig.contains("send") && !sig.contains("send a chat")) {
+                val isSendSig = (sig.contains("send") || sig.contains("send_btn") || sig.contains("send_button")) &&
+                    !sig.contains("send a chat") &&
+                    !sig.contains("send photo") &&
+                    !sig.contains("send video")
+                if (isSendSig) {
                     val r = Rect()
                     node.getBoundsInScreen(r)
-                    if (r.width() > 8 && r.height() > 8) {
-                        bestRect = r
+                    if (r.width() > 8 && r.height() > 8 && r.top > dm.heightPixels * 0.35f) {
+                        if (bestRect == null || r.right > bestRect!!.right) {
+                            bestRect = r
+                        }
                     }
                 }
             }
@@ -560,7 +744,7 @@ class JarvisAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun findClickableByKeywords(root: AccessibilityNodeInfo, keywords: List<String>): Rect? {
+    private fun findClickableNodeByKeywords(root: AccessibilityNodeInfo, keywords: List<String>): AccessibilityNodeInfo? {
         val candidates = mutableListOf<Pair<AccessibilityNodeInfo, Int>>()
         traverseNodes(root) { node ->
             if (!node.isVisibleToUser) return@traverseNodes
@@ -571,13 +755,25 @@ class JarvisAccessibilityService : AccessibilityService() {
             }
         }
         val best = candidates.minByOrNull { it.second }?.first ?: return null
+        var cur: AccessibilityNodeInfo? = best
+        var depth = 0
+        while (cur != null && depth < 6) {
+            if (cur.isClickable) return cur
+            cur = cur.parent
+            depth++
+        }
+        return best
+    }
+
+    private fun findClickableByKeywords(root: AccessibilityNodeInfo, keywords: List<String>): Rect? {
+        val best = findClickableNodeByKeywords(root, keywords) ?: return null
         return findClickableAncestorBounds(best) ?: Rect().also { best.getBoundsInScreen(it) }
     }
 
-    private fun findClickableAncestorBounds(node: AccessibilityNodeInfo): Rect? {
+    private fun findClickableAncestorBounds(node: AccessibilityNodeInfo, maxDepth: Int = 5): Rect? {
         var cur: AccessibilityNodeInfo? = node
         var depth = 0
-        while (cur != null && depth < 5) {
+        while (cur != null && depth < maxDepth) {
             if (cur.isClickable) {
                 val r = Rect()
                 cur.getBoundsInScreen(r)

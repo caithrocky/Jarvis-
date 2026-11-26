@@ -271,6 +271,42 @@ class JarvisEngineUnitTest {
         assertEquals(SystemIntentKind.OPEN_APP, tolerantActions[0].kind)
         assertEquals("Chrome", tolerantActions[0].primaryArg)
         assertEquals(SystemIntentKind.SIGNIN_ASSIST, tolerantActions[1].kind)
+
+        // Compound messaging / search / social flows carry platform context cleanly
+        val waCompoundMsg = JarvisSystemAssistant.parseCommands("open WhatsApp and text Alex hey")
+        assertEquals(1, waCompoundMsg.size)
+        assertEquals(SystemIntentKind.TEXT_CONTACT, waCompoundMsg[0].kind)
+        assertEquals("WhatsApp", waCompoundMsg[0].primaryArg)
+        assertEquals("Alex|hey", waCompoundMsg[0].secondaryArg)
+
+        val waCompoundNoMsg = JarvisSystemAssistant.parseCommands("open WhatsApp and text Sarah")
+        assertEquals(1, waCompoundNoMsg.size)
+        assertEquals(SystemIntentKind.TEXT_CONTACT, waCompoundNoMsg[0].kind)
+        assertEquals("WhatsApp", waCompoundNoMsg[0].primaryArg)
+        assertEquals("Sarah|", waCompoundNoMsg[0].secondaryArg)
+
+        val waCalledSaying = JarvisSystemAssistant.parseCommands("open WhatsApp and message someone called John saying I'm on my way")
+        assertEquals(1, waCalledSaying.size)
+        assertEquals(SystemIntentKind.TEXT_CONTACT, waCalledSaying[0].kind)
+        assertEquals("WhatsApp", waCalledSaying[0].primaryArg)
+        assertEquals("John|I'm on my way", waCalledSaying[0].secondaryArg)
+
+        val igCompoundDm = JarvisSystemAssistant.parseCommands("open Instagram and DM Maya hey")
+        assertEquals(1, igCompoundDm.size)
+        assertEquals(SystemIntentKind.TEXT_CONTACT, igCompoundDm[0].kind)
+        assertEquals("Instagram", igCompoundDm[0].primaryArg)
+        assertEquals("Maya|hey", igCompoundDm[0].secondaryArg)
+
+        val chromeSearch = JarvisSystemAssistant.parseCommands("open Chrome and search bitcoin price")
+        assertEquals(1, chromeSearch.size)
+        assertEquals(SystemIntentKind.WEB_SEARCH, chromeSearch[0].kind)
+        assertEquals("bitcoin price", chromeSearch[0].primaryArg)
+
+        val igLike = JarvisSystemAssistant.parseCommands("open Instagram and like this post")
+        assertEquals(1, igLike.size)
+        assertEquals(SystemIntentKind.SOCIAL_ACTION, igLike[0].kind)
+        assertEquals("like", igLike[0].primaryArg)
+        assertEquals("Instagram", igLike[0].secondaryArg)
     }
 
     @Test
