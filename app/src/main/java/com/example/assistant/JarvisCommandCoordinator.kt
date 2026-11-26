@@ -131,6 +131,7 @@ class JarvisCommandCoordinator(
     fun onForegroundChanged(inForeground: Boolean) {
         isAppInForeground = inForeground
         sessionManager.updateForeground(inForeground)
+        voiceEngine.setUserFacingActive(inForeground || manualOrbPinned)
         scope.launch {
             val settings = prefsRepo.settingsFlow.first()
             if (!inForeground) {
@@ -572,6 +573,8 @@ class JarvisCommandCoordinator(
                     }
                     voiceEngine.speak(replyText.take(520), followUpListen = fromVoice)
                 }
+            } else {
+                voiceEngine.onCommandHandlingFinished(expectFollowUp = fromVoice)
             }
         }
     }
@@ -1004,6 +1007,8 @@ class JarvisCommandCoordinator(
         )
         if (currentSettings.voiceOutputEnabled && !voiceEngine.isMuted.value) {
             voiceEngine.speak(reply, followUpListen = fromVoice)
+        } else {
+            voiceEngine.onCommandHandlingFinished(expectFollowUp = fromVoice)
         }
     }
 

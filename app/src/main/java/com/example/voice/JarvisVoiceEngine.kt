@@ -12,10 +12,13 @@ import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -42,6 +45,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Locale
@@ -73,7 +77,7 @@ class JarvisVoiceEngine(
     @Volatile
     private var ttsInitFailed = false
     @Volatile
-    private var forceStandardRecognizer = false
+    private var forceStandardRecognizer = true
 
     private data class PendingUtterance(
         val text: String,
@@ -96,6 +100,25 @@ class JarvisVoiceEngine(
     @Volatile
     private var lastRecognizerActivityMs = 0L
     private var watchdogJob: Job? = null
+    private var standbyMonitorJob: Job? = null
+    @Volatile
+    private var activeStandbyAudioRecord: AudioRecord? = null
+    @Volatile
+    private var isPipeSessionActive = false
+    @Volatile
+    private var pipeAudioSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+    @Volatile
+    private var pipeSessionReceivedCallbacks = false
+    @Volatile
+    private var currentRecognizerIsPipe = false
+    @Volatile
+    private var activePipeReadFd: ParcelFileDescriptor? = null
+    @Volatile
+    private var lastSessionPartialTranscript = ""
+    @Volatile
+    private var lastActiveCommandEnteredAtMs = 0L
+    @Volatile
+    private var userFacingActive = false
 
     @Volatile
     private var activeAudioTrack: AudioTrack? = null
@@ -202,10 +225,15 @@ class JarvisVoiceEngine(
         onBargeInTriggered = onBargeIn
     }
 
+    fun setUserFacingActive(active: Boolean) {
+        userFacingActive = active
+    }
+
     fun setMuted(muted: Boolean) {
         _isMuted.value = muted
         if (muted) {
             vad.stopBargeInMonitor()
+            stopContinuousStandbyMonitor()
             interruptSpeech()
             watchdogJob?.cancel()
             watchdogJob = null
@@ -217,6 +245,7 @@ class JarvisVoiceEngine(
             _partialTranscript.value = ""
             _statusDetail.value = "Microphone muted"
             mainHandler.post {
+                closeActivePipeReadFd()
                 runCatching { speechRecognizer?.cancel() }
                 runCatching { speechRecognizer?.destroy() }
                 speechRecognizer = null
@@ -282,7 +311,7 @@ class JarvisVoiceEngine(
         }
         val alreadyWarm = alwaysOnEnabled &&
             _phase.value == VoicePipelinePhase.WAKE_WORD_STANDBY &&
-            isRecognizerListening
+            (standbyMonitorJob?.isActive == true || isRecognizerListening)
         alwaysOnEnabled = true
         continuousSession = false
         sessionChimePlayed = false
@@ -290,7 +319,8 @@ class JarvisVoiceEngine(
         _statusDetail.value = "Always listening for \"Hey JARVIS\""
         startAlwaysOnWatchdog()
         if (!alreadyWarm) {
-            mainHandler.post { startRecognizerSession() }
+            mainHandler.post { ensureSpeechRecognizer() }
+            startContinuousStandbyMonitor()
         }
     }
 
@@ -302,16 +332,36 @@ class JarvisVoiceEngine(
             _statusDetail.value = "Microphone permission required"
             return
         }
-        val enteringActiveSession = _phase.value != VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
+        @Suppress("UNUSED_VARIABLE")
+        val unusedPlayChime = playChime
         interruptSpeech()
+        stopContinuousStandbyMonitor()
         continuousSession = keepConversationLoop
         _phase.value = VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
+        lastActiveCommandEnteredAtMs = System.currentTimeMillis()
         _statusDetail.value = "Listening, Sir..."
-        if ((playChime || enteringActiveSession) && !sessionChimePlayed) {
-            sessionChimePlayed = true
-            JarvisChimePlayer.playActivationChime(engineScope)
+        mainHandler.post { startDirectRecognizerSession() }
+    }
+
+    fun onCommandHandlingFinished(expectFollowUp: Boolean) {
+        if (_phase.value == VoicePipelinePhase.SPEAKING_RESPONSE) return
+        if (_isMuted.value) {
+            _phase.value = VoicePipelinePhase.STOPPED
+            return
         }
-        mainHandler.post { startRecognizerSession() }
+        if (alwaysOnEnabled) {
+            _phase.value = VoicePipelinePhase.WAKE_WORD_STANDBY
+            continuousSession = expectFollowUp
+            _statusDetail.value = "Always listening for \"Hey JARVIS\""
+            startContinuousStandbyMonitor()
+        } else if (expectFollowUp && continuousSession) {
+            _phase.value = VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
+            lastActiveCommandEnteredAtMs = System.currentTimeMillis()
+            scheduleNextListen(80L)
+        } else {
+            _phase.value = VoicePipelinePhase.STOPPED
+            _statusDetail.value = "Voice standby"
+        }
     }
 
     suspend fun enrollOwnerVoiceProfile(
@@ -494,6 +544,7 @@ class JarvisVoiceEngine(
         continuousSession = false
         watchdogJob?.cancel()
         watchdogJob = null
+        stopContinuousStandbyMonitor()
         pendingListenRunnable?.let { mainHandler.removeCallbacks(it) }
         pendingListenRunnable = null
         isRecognizerListening = false
@@ -502,6 +553,7 @@ class JarvisVoiceEngine(
         _partialTranscript.value = ""
         _statusDetail.value = "Voice standby"
         mainHandler.post {
+            closeActivePipeReadFd()
             runCatching { speechRecognizer?.cancel() }
             runCatching { speechRecognizer?.destroy() }
             speechRecognizer = null
@@ -514,10 +566,12 @@ class JarvisVoiceEngine(
         streamingSpeechChannel?.close()
         pendingUtterance = null
         stopAudioTrack()
+        stopContinuousStandbyMonitor()
         pendingListenRunnable?.let { mainHandler.removeCallbacks(it) }
         pendingListenRunnable = null
         isRecognizerListening = false
         mainHandler.post {
+            closeActivePipeReadFd()
             runCatching { speechRecognizer?.cancel() }
             if (tts?.isSpeaking == true) tts?.stop()
         }
@@ -541,7 +595,9 @@ class JarvisVoiceEngine(
                 if (cleanSentence.isBlank()) continue
 
                 if (useNeuralNimTts && magpieTtsClient != null && SecretsConfig.hasNvidiaNim) {
-                    val synth = magpieTtsClient.synthesize(cleanSentence, currentPersonality).getOrNull()
+                    val synth = withTimeoutOrNull(4500L) {
+                        magpieTtsClient.synthesize(cleanSentence, currentPersonality).getOrNull()
+                    }
                     if (!isActive || speechGeneration.get() != token) break
                     if (synth != null && synth.pcmBytes.isNotEmpty()) {
                         playPcmAudio(synth, cleanSentence, token, followUpListen = false, completePipelineOnEnd = false)
@@ -574,7 +630,10 @@ class JarvisVoiceEngine(
 
     fun speak(text: String, followUpListen: Boolean = true) {
         val clean = sanitizeSpeechInput(text)
-        if (clean.isBlank()) return
+        if (clean.isBlank()) {
+            onSpeechCompleted(followUpListen)
+            return
+        }
 
         val token = speechGeneration.incrementAndGet()
         activeNeuralJob?.cancel()
@@ -582,21 +641,26 @@ class JarvisVoiceEngine(
         streamingSpeechChannel = null
         pendingUtterance = null
         stopAudioTrack()
+        stopContinuousStandbyMonitor()
 
         if (useNeuralNimTts && magpieTtsClient != null && SecretsConfig.hasNvidiaNim) {
             pendingListenRunnable?.let { mainHandler.removeCallbacks(it) }
             pendingListenRunnable = null
             isRecognizerListening = false
-            mainHandler.post { runCatching { speechRecognizer?.cancel() } }
+            mainHandler.post {
+                closeActivePipeReadFd()
+                runCatching { speechRecognizer?.cancel() }
+            }
             _phase.value = VoicePipelinePhase.SPEAKING_RESPONSE
             _statusDetail.value = "Speaking (${currentPersonality.nimVoiceName.substringAfterLast(".")})"
             startBargeInWatch(token)
 
             activeNeuralJob = engineScope.launch {
-                val synthResult = magpieTtsClient.synthesize(clean, currentPersonality)
+                val audio = withTimeoutOrNull(4500L) {
+                    magpieTtsClient.synthesize(clean, currentPersonality).getOrNull()
+                }
                 if (!isActive || speechGeneration.get() != token) return@launch
 
-                val audio = synthResult.getOrNull()
                 if (audio != null && audio.pcmBytes.isNotEmpty()) {
                     playPcmAudio(audio, clean, token, followUpListen, completePipelineOnEnd = true)
                 } else {
@@ -874,17 +938,21 @@ class JarvisVoiceEngine(
             if (_isMuted.value) {
                 _phase.value = VoicePipelinePhase.STOPPED
                 _statusDetail.value = "Microphone muted"
-            } else if (alwaysOnEnabled || (followUpListen && continuousSession)) {
-                _phase.value = if (followUpListen) {
-                    VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
-                } else {
-                    VoicePipelinePhase.WAKE_WORD_STANDBY
-                }
+            } else if (alwaysOnEnabled) {
+                // Keep continuous silent AudioRecord standby hot with zero mic chimes/pauses;
+                // continuousSession stays true briefly on follow-up so direct replies work everywhere
+                continuousSession = followUpListen
+                _phase.value = VoicePipelinePhase.WAKE_WORD_STANDBY
                 _statusDetail.value = if (followUpListen) {
                     "Listening for follow-up, Sir..."
                 } else {
                     "Always listening for \"Hey JARVIS\""
                 }
+                startContinuousStandbyMonitor()
+            } else if (followUpListen && continuousSession) {
+                _phase.value = VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
+                lastActiveCommandEnteredAtMs = System.currentTimeMillis()
+                _statusDetail.value = "Listening for follow-up, Sir..."
                 scheduleNextListen(80L)
             } else {
                 _phase.value = VoicePipelinePhase.STOPPED
@@ -920,7 +988,7 @@ class JarvisVoiceEngine(
                     else -> "Ready"
                 }
                 if (alwaysOnEnabled && !_isMuted.value) {
-                    scheduleNextListen(60L)
+                    startContinuousStandbyMonitor()
                 }
             }
         }
@@ -1030,67 +1098,97 @@ class JarvisVoiceEngine(
             setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {
                     isRecognizerListening = true
+                    if (currentRecognizerIsPipe) pipeSessionReceivedCallbacks = true
                     lastRecognizerActivityMs = System.currentTimeMillis()
+                    lastSessionPartialTranscript = ""
                     _partialTranscript.value = ""
                 }
 
                 override fun onBeginningOfSpeech() {
+                    if (currentRecognizerIsPipe) pipeSessionReceivedCallbacks = true
                     lastRecognizerActivityMs = System.currentTimeMillis()
-                    if (_phase.value == VoicePipelinePhase.SPEAKING_RESPONSE) {
-                        interruptSpeech()
-                    }
                 }
 
                 override fun onRmsChanged(rmsdB: Float) {
                     lastRecognizerActivityMs = System.currentTimeMillis()
-                    val normalized = ((rmsdB + 2f) / 12f).coerceIn(0.05f, 1f)
-                    vad.updateAmbientRms(normalized)
-                    _rmsLevel.value = normalized
+                    if (!currentRecognizerIsPipe && standbyMonitorJob?.isActive != true) {
+                        val normalized = ((rmsdB + 2f) / 12f).coerceIn(0.05f, 1f)
+                        _rmsLevel.value = normalized
+                    }
                 }
 
                 override fun onBufferReceived(buffer: ByteArray?) {}
 
                 override fun onEndOfSpeech() {
-                    _rmsLevel.value = 0.08f
+                    if (!currentRecognizerIsPipe) {
+                        _rmsLevel.value = 0.08f
+                    }
                 }
 
                 override fun onError(error: Int) {
+                    val wasPipe = currentRecognizerIsPipe
+                    val hadPipeCallbacks = pipeSessionReceivedCallbacks
+                    val partialCandidate = lastSessionPartialTranscript.trim()
+
                     isRecognizerListening = false
-                    _rmsLevel.value = 0f
+                    currentRecognizerIsPipe = false
+                    isPipeSessionActive = false
+                    closeActivePipeReadFd()
+                    if (!wasPipe) _rmsLevel.value = 0f
+                    lastSessionPartialTranscript = ""
+
+                    if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                        alwaysOnEnabled = false
+                        continuousSession = false
+                        stopContinuousStandbyMonitor()
+                        _phase.value = VoicePipelinePhase.STOPPED
+                        _statusDetail.value = mapRecognizerError(error)
+                        return
+                    }
+
+                    // If this phone's SpeechRecognizer rejected external audio pipe, permanently switch to direct mic handoff cleanly
+                    if (wasPipe && !hadPipeCallbacks &&
+                        error != SpeechRecognizer.ERROR_SPEECH_TIMEOUT
+                    ) {
+                        pipeAudioSupported = false
+                        stopContinuousStandbyMonitor()
+                        recreateRecognizerAndRestartDirect(70L)
+                        return
+                    }
+
+                    // Recover spoken partial transcript if recognizer ended on timeout/no-match after hearing words
+                    if (partialCandidate.isNotBlank() &&
+                        (error == SpeechRecognizer.ERROR_NO_MATCH ||
+                            error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
+                            error == SpeechRecognizer.ERROR_AUDIO ||
+                            error == SpeechRecognizer.ERROR_CLIENT)
+                    ) {
+                        handleRecognizedText(partialCandidate, isFinal = true)
+                        return
+                    }
 
                     val onDeviceError = error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ||
                         error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED ||
                         error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED
                     if (!forceStandardRecognizer && onDeviceError) {
                         forceStandardRecognizer = true
-                        recreateRecognizerAndRestart(80L)
+                        recreateRecognizerAndRestartDirect(80L)
                         return
                     }
-
-                    if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
-                        alwaysOnEnabled = false
-                        continuousSession = false
-                        _phase.value = VoicePipelinePhase.STOPPED
-                        _statusDetail.value = mapRecognizerError(error)
-                        return
-                    }
-
-                    val isHardRecognizerFailure = error == SpeechRecognizer.ERROR_CLIENT ||
-                        error == SpeechRecognizer.ERROR_AUDIO ||
-                        error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY
-                    val isNetworkError = error == SpeechRecognizer.ERROR_NETWORK ||
-                        error == SpeechRecognizer.ERROR_NETWORK_TIMEOUT
 
                     if (alwaysOnEnabled && !_isMuted.value && _phase.value != VoicePipelinePhase.SPEAKING_RESPONSE) {
-                        when {
-                            isHardRecognizerFailure ->
-                                recreateRecognizerAndRestart(if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 320L else 140L)
-                            isNetworkError ->
-                                scheduleNextListen(500L)
-                            else ->
-                                // ERROR_NO_MATCH or ERROR_SPEECH_TIMEOUT: keep same warm recognizer & restart immediately
-                                scheduleNextListen(35L)
+                        if (error == SpeechRecognizer.ERROR_CLIENT ||
+                            error == SpeechRecognizer.ERROR_AUDIO ||
+                            error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY
+                        ) {
+                            runCatching { speechRecognizer?.cancel() }
+                            runCatching { speechRecognizer?.destroy() }
+                            speechRecognizer = null
                         }
+                        // Return to continuous silent AudioRecord standby instead of looping SpeechRecognizer during silence
+                        _phase.value = VoicePipelinePhase.WAKE_WORD_STANDBY
+                        _statusDetail.value = "Always listening for \"Hey JARVIS\""
+                        startContinuousStandbyMonitor()
                     } else if (!alwaysOnEnabled) {
                         continuousSession = false
                         _phase.value = VoicePipelinePhase.STOPPED
@@ -1100,18 +1198,26 @@ class JarvisVoiceEngine(
 
                 override fun onResults(results: Bundle?) {
                     isRecognizerListening = false
+                    currentRecognizerIsPipe = false
+                    isPipeSessionActive = false
+                    closeActivePipeReadFd()
                     lastRecognizerActivityMs = System.currentTimeMillis()
-                    _rmsLevel.value = 0f
+                    if (standbyMonitorJob?.isActive != true) _rmsLevel.value = 0f
+
                     val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                         ?.firstOrNull()?.trim().orEmpty()
+                        .ifBlank { lastSessionPartialTranscript.trim() }
+                    lastSessionPartialTranscript = ""
                     handleRecognizedText(text, isFinal = true)
                 }
 
                 override fun onPartialResults(partialResults: Bundle?) {
+                    if (currentRecognizerIsPipe) pipeSessionReceivedCallbacks = true
                     lastRecognizerActivityMs = System.currentTimeMillis()
                     val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                         ?.firstOrNull()?.trim().orEmpty()
                     if (text.isNotBlank()) {
+                        lastSessionPartialTranscript = text
                         _partialTranscript.value = text
                         if (_phase.value == VoicePipelinePhase.WAKE_WORD_STANDBY) {
                             val eval = ContextualWakeDetector.evaluate(text, inActiveConversation = false)
@@ -1127,35 +1233,301 @@ class JarvisVoiceEngine(
         }.also { speechRecognizer = it }
     }
 
-    private fun recreateRecognizerAndRestart(delayMs: Long) {
+    private fun closeActivePipeReadFd() {
+        val fd = activePipeReadFd
+        activePipeReadFd = null
+        if (fd != null) {
+            runCatching { fd.close() }
+        }
+    }
+
+    private fun stopContinuousStandbyMonitor() {
+        isPipeSessionActive = false
+        standbyMonitorJob?.cancel()
+        standbyMonitorJob = null
+        activeStandbyAudioRecord?.let { rec ->
+            runCatching { rec.stop() }
+            runCatching { rec.release() }
+        }
+        activeStandbyAudioRecord = null
+    }
+
+    private fun startContinuousStandbyMonitor() {
+        if (!alwaysOnEnabled || _isMuted.value || !hasMicPermission()) return
+        if (_phase.value == VoicePipelinePhase.SPEAKING_RESPONSE) return
+        if (standbyMonitorJob?.isActive == true) return
+        if (isRecognizerListening) return
+
+        standbyMonitorJob = engineScope.launch(Dispatchers.IO) {
+            val sampleRate = 16000
+            val minBuf = AudioRecord.getMinBufferSize(
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            )
+            if (minBuf <= 0) {
+                mainHandler.post { startDirectRecognizerSession() }
+                return@launch
+            }
+
+            val bufSize = maxOf(minBuf * 2, 16000)
+            val recorder = runCatching {
+                AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    bufSize
+                )
+            }.getOrNull()
+
+            if (recorder == null || recorder.state != AudioRecord.STATE_INITIALIZED) {
+                runCatching { recorder?.release() }
+                mainHandler.post { startDirectRecognizerSession() }
+                return@launch
+            }
+
+            activeStandbyAudioRecord = recorder
+            // 960ms circular pre-roll ring buffer (16000 Hz * 2 bytes * 0.96s = 30720 bytes)
+            val preRollCapacity = 30_720
+            val ringBuffer = ByteArray(preRollCapacity)
+            var ringWritePos = 0
+            var ringFilled = 0
+
+            val chunkShorts = 512 // 32ms per frame
+            val shortBuf = ShortArray(chunkShorts)
+            val byteBuf = ByteArray(chunkShorts * 2)
+
+            var hotFrames = 0
+            var pipeStream: ParcelFileDescriptor.AutoCloseOutputStream? = null
+            var pipeUtteranceStartedAtMs = 0L
+            var pipeLastVoiceMs = 0L
+            var switchToDirectRecognizer = false
+
+            try {
+                recorder.startRecording()
+                while (isActive &&
+                    alwaysOnEnabled &&
+                    !_isMuted.value &&
+                    _phase.value != VoicePipelinePhase.SPEAKING_RESPONSE
+                ) {
+                    val read = recorder.read(shortBuf, 0, chunkShorts)
+                    if (read <= 0) {
+                        if (isPipeSessionActive) {
+                            runCatching { pipeStream?.close() }
+                            pipeStream = null
+                            isPipeSessionActive = false
+                            pipeAudioSupported = false
+                        }
+                        break
+                    }
+
+                    var sumSq = 0.0
+                    var peak = 0
+                    val byteLen = read * 2
+                    for (i in 0 until read) {
+                        val sVal = shortBuf[i].toInt()
+                        val absV = if (sVal < 0) -sVal else sVal
+                        if (absV > peak) peak = absV
+                        val norm = sVal / 32768.0
+                        sumSq += norm * norm
+                        byteBuf[i * 2] = (sVal and 0xFF).toByte()
+                        byteBuf[i * 2 + 1] = ((sVal ushr 8) and 0xFF).toByte()
+                    }
+                    val rawRms = sqrt(sumSq / read).toFloat()
+                    val displayRms = (rawRms * 4.2f).coerceIn(0.04f, 1.0f)
+
+                    if (_phase.value != VoicePipelinePhase.SPEAKING_RESPONSE) {
+                        _rmsLevel.value = displayRms
+                    }
+
+                    for (bIdx in 0 until byteLen) {
+                        ringBuffer[ringWritePos] = byteBuf[bIdx]
+                        ringWritePos = (ringWritePos + 1) % preRollCapacity
+                        if (ringFilled < preRollCapacity) ringFilled++
+                    }
+
+                    val activePipe = pipeStream
+                    if (isPipeSessionActive && activePipe != null) {
+                        val writtenOk = runCatching {
+                            activePipe.write(byteBuf, 0, byteLen)
+                            true
+                        }.getOrDefault(false)
+
+                        val now = System.currentTimeMillis()
+                        if (vad.isSpeechOverThreshold(rawRms, peak) || peak >= 750) {
+                            pipeLastVoiceMs = now
+                        }
+                        val elapsed = now - pipeUtteranceStartedAtMs
+                        val silenceGap = now - pipeLastVoiceMs
+                        val shouldFinishUtterance = !writtenOk ||
+                            !isPipeSessionActive ||
+                            (elapsed >= 550L && silenceGap >= 1300L) ||
+                            elapsed >= 11_000L
+
+                        if (shouldFinishUtterance) {
+                            runCatching { activePipe.flush() }
+                            runCatching { activePipe.close() }
+                            pipeStream = null
+                            isPipeSessionActive = false
+                            hotFrames = 0
+                        }
+                        continue
+                    }
+
+                    if (isRecognizerListening) {
+                        break
+                    }
+
+                    vad.updateAmbientRms(rawRms)
+
+                    if (vad.isSpeechOverThreshold(rawRms, peak)) {
+                        hotFrames++
+                        if (hotFrames >= 2) {
+                            hotFrames = 0
+                            if (pipeAudioSupported && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                val pipeStarted = runCatching {
+                                    val pipe = ParcelFileDescriptor.createPipe()
+                                    val readFd = pipe[0]
+                                    val out = ParcelFileDescriptor.AutoCloseOutputStream(pipe[1])
+                                    if (ringFilled > 0) {
+                                        if (ringFilled < preRollCapacity) {
+                                            out.write(ringBuffer, 0, ringFilled)
+                                        } else {
+                                            val firstPart = preRollCapacity - ringWritePos
+                                            if (firstPart > 0) out.write(ringBuffer, ringWritePos, firstPart)
+                                            if (ringWritePos > 0) out.write(ringBuffer, 0, ringWritePos)
+                                        }
+                                    }
+                                    out.flush()
+                                    pipeStream = out
+                                    isPipeSessionActive = true
+                                    pipeSessionReceivedCallbacks = false
+                                    pipeUtteranceStartedAtMs = System.currentTimeMillis()
+                                    pipeLastVoiceMs = pipeUtteranceStartedAtMs
+                                    mainHandler.post { startPipeRecognizerSession(readFd) }
+                                    true
+                                }.getOrDefault(false)
+
+                                if (!pipeStarted) {
+                                    pipeAudioSupported = false
+                                    switchToDirectRecognizer = true
+                                    break
+                                }
+                            } else {
+                                switchToDirectRecognizer = true
+                                break
+                            }
+                        }
+                    } else {
+                        hotFrames = 0
+                    }
+                }
+            } catch (_: Throwable) {
+                // Recover cleanly via watchdog/handoff
+            } finally {
+                runCatching { pipeStream?.close() }
+                isPipeSessionActive = false
+                if (activeStandbyAudioRecord === recorder) {
+                    activeStandbyAudioRecord = null
+                }
+                runCatching { recorder.stop() }
+                runCatching { recorder.release() }
+            }
+
+            if (switchToDirectRecognizer &&
+                alwaysOnEnabled &&
+                !_isMuted.value &&
+                _phase.value != VoicePipelinePhase.SPEAKING_RESPONSE
+            ) {
+                mainHandler.post { startDirectRecognizerSession() }
+            }
+        }
+    }
+
+    private fun isNetworkConnected(): Boolean {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
+        val network = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(network) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+
+    private fun buildRecognizerIntent(readFd: ParcelFileDescriptor? = null): Intent {
+        val useOfflineOnly = !isNetworkConnected()
+        return Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.US.toLanguageTag())
+            if (useOfflineOnly) {
+                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            }
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 15000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2400L)
+            if (readFd != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, readFd)
+                putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
+                putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
+                putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, 16000)
+            }
+        }
+    }
+
+    private fun startPipeRecognizerSession(readFd: ParcelFileDescriptor) {
+        if (!hasMicPermission() || _isMuted.value || _phase.value == VoicePipelinePhase.SPEAKING_RESPONSE) {
+            runCatching { readFd.close() }
+            isPipeSessionActive = false
+            return
+        }
+        if (isRecognizerListening) {
+            runCatching { readFd.close() }
+            isPipeSessionActive = false
+            return
+        }
+        closeActivePipeReadFd()
+        activePipeReadFd = readFd
+        currentRecognizerIsPipe = true
+        pipeSessionReceivedCallbacks = false
+        lastSessionPartialTranscript = ""
+
+        val recognizer = ensureSpeechRecognizer()
+        val intent = buildRecognizerIntent(readFd)
+        isRecognizerListening = true
+        lastRecognizerActivityMs = System.currentTimeMillis()
+        runCatching {
+            recognizer.startListening(intent)
+        }.onFailure {
+            isRecognizerListening = false
+            currentRecognizerIsPipe = false
+            isPipeSessionActive = false
+            closeActivePipeReadFd()
+            pipeAudioSupported = false
+            stopContinuousStandbyMonitor()
+            recreateRecognizerAndRestartDirect(70L)
+        }
+    }
+
+    private fun recreateRecognizerAndRestartDirect(delayMs: Long) {
         isRecognizerListening = false
+        currentRecognizerIsPipe = false
+        closeActivePipeReadFd()
         runCatching { speechRecognizer?.cancel() }
         runCatching { speechRecognizer?.destroy() }
         speechRecognizer = null
         scheduleNextListen(delayMs)
     }
 
-    private fun startRecognizerSession() {
+    private fun startDirectRecognizerSession() {
         if (!hasMicPermission() || _isMuted.value) return
         if (_phase.value == VoicePipelinePhase.STOPPED || _phase.value == VoicePipelinePhase.SPEAKING_RESPONSE) return
         if (isRecognizerListening) return
 
-        val recognizer = ensureSpeechRecognizer()
-        val useOffline = !forceStandardRecognizer && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
+        stopContinuousStandbyMonitor()
+        currentRecognizerIsPipe = false
+        lastSessionPartialTranscript = ""
 
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.US.toLanguageTag())
-            if (useOffline) {
-                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-            }
-            // Generous continuous-listening silence windows so the mic stays open smoothly
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 30000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2200L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2600L)
-        }
+        val recognizer = ensureSpeechRecognizer()
+        val intent = buildRecognizerIntent(readFd = null)
         isRecognizerListening = true
         lastRecognizerActivityMs = System.currentTimeMillis()
         runCatching {
@@ -1163,7 +1535,8 @@ class JarvisVoiceEngine(
         }.onFailure {
             isRecognizerListening = false
             if (alwaysOnEnabled && !_isMuted.value) {
-                recreateRecognizerAndRestart(220L)
+                _phase.value = VoicePipelinePhase.WAKE_WORD_STANDBY
+                startContinuousStandbyMonitor()
             } else {
                 _statusDetail.value = "Speech recognizer unavailable on device"
                 _phase.value = VoicePipelinePhase.STOPPED
@@ -1199,7 +1572,9 @@ class JarvisVoiceEngine(
 
         if (text.isBlank()) {
             if (alwaysOnEnabled) {
-                scheduleNextListen(40L)
+                _phase.value = VoicePipelinePhase.WAKE_WORD_STANDBY
+                _statusDetail.value = "Always listening for \"Hey JARVIS\""
+                startContinuousStandbyMonitor()
             } else {
                 continuousSession = false
                 sessionChimePlayed = false
@@ -1218,43 +1593,55 @@ class JarvisVoiceEngine(
 
         if (_phase.value == VoicePipelinePhase.WAKE_WORD_STANDBY) {
             val wakeEval = ContextualWakeDetector.evaluate(text, inActiveConversation = false)
-            if (wakeEval.intent == WakeIntent.DIRECT_WAKE) {
-                if (!sessionChimePlayed) {
-                    sessionChimePlayed = true
-                    JarvisChimePlayer.playActivationChime(engineScope)
+            when (wakeEval.intent) {
+                WakeIntent.CASUAL_MENTION -> {
+                    if (alwaysOnEnabled) startContinuousStandbyMonitor()
                 }
-                val remainder = wakeEval.remainder
-                onWakeDetected?.invoke(remainder)
-                if (remainder.isNotBlank()) {
-                    _phase.value = VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
-                    continuousSession = true
-                    onCommandCaptured?.invoke(remainder)
-                    if (alwaysOnEnabled && _phase.value != VoicePipelinePhase.SPEAKING_RESPONSE) {
-                        scheduleNextListen(60L)
+                WakeIntent.DIRECT_WAKE -> {
+                    val remainder = wakeEval.remainder
+                    onWakeDetected?.invoke(remainder)
+                    if (remainder.isNotBlank()) {
+                        _phase.value = VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
+                        lastActiveCommandEnteredAtMs = System.currentTimeMillis()
+                        continuousSession = true
+                        _statusDetail.value = "On it, Sir..."
+                        onCommandCaptured?.invoke(remainder)
+                    } else {
+                        _phase.value = VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
+                        lastActiveCommandEnteredAtMs = System.currentTimeMillis()
+                        continuousSession = true
+                        speak("Yes Sir, I'm listening.", followUpListen = true)
                     }
-                } else {
-                    _phase.value = VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
-                    continuousSession = true
-                    speak("Yes Sir, I'm listening.", followUpListen = true)
                 }
-            } else if (alwaysOnEnabled) {
-                scheduleNextListen(40L)
+                WakeIntent.NONE -> {
+                    if (userFacingActive || continuousSession) {
+                        _phase.value = VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE
+                        lastActiveCommandEnteredAtMs = System.currentTimeMillis()
+                        continuousSession = true
+                        _statusDetail.value = "On it, Sir..."
+                        onCommandCaptured?.invoke(text)
+                    } else if (alwaysOnEnabled) {
+                        startContinuousStandbyMonitor()
+                    }
+                }
             }
             return
         }
 
         if (_phase.value == VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE) {
             val eval = ContextualWakeDetector.evaluate(text, inActiveConversation = true)
+            if (eval.intent == WakeIntent.CASUAL_MENTION && !userFacingActive) {
+                onCommandHandlingFinished(expectFollowUp = true)
+                return
+            }
             val cleanedCommand = if (eval.intent == WakeIntent.DIRECT_WAKE && eval.remainder.isNotBlank()) {
                 eval.remainder
             } else {
                 text
             }
+            lastActiveCommandEnteredAtMs = System.currentTimeMillis()
+            _statusDetail.value = "On it, Sir..."
             onCommandCaptured?.invoke(cleanedCommand)
-            // Keep microphone continuously hot while JARVIS thinks/acts unless TTS takes the mic
-            if ((alwaysOnEnabled || continuousSession) && _phase.value != VoicePipelinePhase.SPEAKING_RESPONSE) {
-                scheduleNextListen(60L)
-            }
         }
     }
 
@@ -1283,7 +1670,7 @@ class JarvisVoiceEngine(
                 !_isMuted.value &&
                 _phase.value != VoicePipelinePhase.SPEAKING_RESPONSE
             ) {
-                startRecognizerSession()
+                startDirectRecognizerSession()
             }
         }
         pendingListenRunnable = r
@@ -1294,16 +1681,40 @@ class JarvisVoiceEngine(
         if (watchdogJob?.isActive == true) return
         watchdogJob = engineScope.launch {
             while (isActive && alwaysOnEnabled) {
-                kotlinx.coroutines.delay(1400L)
+                kotlinx.coroutines.delay(1500L)
                 if (!alwaysOnEnabled || _isMuted.value || !hasMicPermission()) continue
                 if (_phase.value == VoicePipelinePhase.SPEAKING_RESPONSE) continue
 
-                val stalled = isRecognizerListening &&
-                    (System.currentTimeMillis() - lastRecognizerActivityMs > 45_000L)
-                if (stalled) {
-                    mainHandler.post { recreateRecognizerAndRestart(80L) }
-                } else if (!isRecognizerListening && pendingListenRunnable == null) {
-                    mainHandler.post { startRecognizerSession() }
+                val now = System.currentTimeMillis()
+                val stalledRecognizer = isRecognizerListening &&
+                    (now - lastRecognizerActivityMs > 25_000L)
+                val stuckActivePhase = _phase.value == VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE &&
+                    !isRecognizerListening &&
+                    !isPipeSessionActive &&
+                    (now - lastActiveCommandEnteredAtMs > 18_000L)
+
+                when {
+                    stalledRecognizer -> mainHandler.post {
+                        isRecognizerListening = false
+                        currentRecognizerIsPipe = false
+                        closeActivePipeReadFd()
+                        runCatching { speechRecognizer?.cancel() }
+                        runCatching { speechRecognizer?.destroy() }
+                        speechRecognizer = null
+                        _phase.value = VoicePipelinePhase.WAKE_WORD_STANDBY
+                        startContinuousStandbyMonitor()
+                    }
+                    stuckActivePhase -> {
+                        _phase.value = VoicePipelinePhase.WAKE_WORD_STANDBY
+                        _statusDetail.value = "Always listening for \"Hey JARVIS\""
+                        startContinuousStandbyMonitor()
+                    }
+                    _phase.value == VoicePipelinePhase.WAKE_WORD_STANDBY &&
+                        standbyMonitorJob?.isActive != true &&
+                        !isRecognizerListening &&
+                        pendingListenRunnable == null -> {
+                        startContinuousStandbyMonitor()
+                    }
                 }
             }
         }

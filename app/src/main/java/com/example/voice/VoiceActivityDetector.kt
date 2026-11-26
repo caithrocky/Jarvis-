@@ -144,59 +144,12 @@ object ContextualWakeDetector {
 }
 
 /**
- * Generates a single soft, translucent harmonic chime (220ms) on assistant activation
- * instead of repetitive Android system microphone beeps.
+ * Chime playback is disabled per user preference so the assistant never emits microphone noises.
  */
 object JarvisChimePlayer {
-    private const val SAMPLE_RATE = 24000
-
+    @Suppress("UNUSED_PARAMETER")
     fun playActivationChime(scope: CoroutineScope) {
-        scope.launch(Dispatchers.IO) {
-            runCatching {
-                val durationMs = 210
-                val count = (SAMPLE_RATE * durationMs) / 1000
-                val samples = ShortArray(count)
-                val f1 = 587.33 // D5 soft primary
-                val f2 = 880.00 // A5 pure fifth shimmer
-                for (i in 0 until count) {
-                    val t = i.toDouble() / SAMPLE_RATE
-                    val progress = i.toDouble() / count
-                    val env = sin(PI * progress) * (1.0 - progress * 0.35)
-                    val tone = 0.62 * sin(2.0 * PI * f1 * t) + 0.38 * sin(2.0 * PI * f2 * t)
-                    samples[i] = (tone * env * 0.24 * Short.MAX_VALUE).toInt().toShort()
-                }
-
-                val minBuf = AudioTrack.getMinBufferSize(
-                    SAMPLE_RATE,
-                    AudioFormat.CHANNEL_OUT_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT
-                ).coerceAtLeast(samples.size * 2)
-
-                val track = AudioTrack.Builder()
-                    .setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_ASSISTANT)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                            .build()
-                    )
-                    .setAudioFormat(
-                        AudioFormat.Builder()
-                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                            .setSampleRate(SAMPLE_RATE)
-                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                            .build()
-                    )
-                    .setBufferSizeInBytes(samples.size * 2.coerceAtLeast(minBuf))
-                    .setTransferMode(AudioTrack.MODE_STATIC)
-                    .build()
-
-                track.write(samples, 0, samples.size)
-                track.play()
-                Thread.sleep(durationMs.toLong() + 40L)
-                runCatching { track.stop() }
-                runCatching { track.release() }
-            }
-        }
+        // Intentionally silent: user denied microphone activation chimes/noises.
     }
 }
 
@@ -209,17 +162,17 @@ class VoiceActivityDetector {
 
     private var bargeInJob: Job? = null
     @Volatile
-    private var adaptiveNoiseFloor = 0.035f
+    private var adaptiveNoiseFloor = 0.007f
 
     fun updateAmbientRms(rms: Float) {
-        if (rms < adaptiveNoiseFloor * 1.4f) {
-            adaptiveNoiseFloor = (adaptiveNoiseFloor * 0.9f + rms * 0.1f).coerceIn(0.02f, 0.22f)
+        if (rms < adaptiveNoiseFloor * 1.8f) {
+            adaptiveNoiseFloor = (adaptiveNoiseFloor * 0.92f + rms * 0.08f).coerceIn(0.003f, 0.035f)
         }
     }
 
-    fun isSpeechOverThreshold(rms: Float): Boolean {
-        val threshold = (adaptiveNoiseFloor * 2.6f).coerceIn(0.16f, 0.55f)
-        return rms >= threshold
+    fun isSpeechOverThreshold(rms: Float, peak: Int = 1000): Boolean {
+        val threshold = (adaptiveNoiseFloor * 2.6f).coerceIn(0.018f, 0.095f)
+        return rms >= threshold && peak >= 850
     }
 
     fun startBargeInMonitor(
@@ -264,11 +217,11 @@ class VoiceActivityDetector {
                 }.getOrNull()
             }
 
-            // Require AEC or higher margin so TTS speaker output doesn't false-trigger on devices without HW AEC
-            val bargeInThreshold = if (aec?.enabled == true) 0.115f else 0.28f
+            // Require strong sustained near-field speech so TTS speaker output never self-interrupts
+            val bargeInThreshold = if (aec?.enabled == true) 0.26f else 0.42f
             val buf = ShortArray(640) // 40ms frames
             var hotFrames = 0
-            val warmupUntil = System.currentTimeMillis() + 360L
+            val warmupUntil = System.currentTimeMillis() + 850L
 
             try {
                 recorder.startRecording()
@@ -286,9 +239,9 @@ class VoiceActivityDetector {
                         if (absV > peak) peak = absV
                     }
                     val rms = sqrt(sumSq / read).toFloat()
-                    if (rms >= bargeInThreshold && peak > 2800) {
+                    if (rms >= bargeInThreshold && peak > 4400) {
                         hotFrames++
-                        if (hotFrames >= 5) { // ~200ms sustained speech
+                        if (hotFrames >= 7) { // ~280ms sustained loud speech
                             onSpeechBargeIn()
                             break
                         }

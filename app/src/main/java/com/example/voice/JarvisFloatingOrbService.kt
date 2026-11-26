@@ -95,7 +95,7 @@ class JarvisFloatingOrbService : Service() {
         }
         if (intent?.getBooleanExtra(EXTRA_START_LISTEN, false) == true) {
             if (app.voiceEngine.hasMicPermission() && !app.voiceEngine.isMuted.value) {
-                app.voiceEngine.startSingleCommandCapture(keepConversationLoop = true, playChime = true)
+                app.voiceEngine.startSingleCommandCapture(keepConversationLoop = true, playChime = false)
             }
         }
         return START_STICKY
@@ -192,7 +192,7 @@ class JarvisFloatingOrbService : Service() {
                             app.voiceEngine.phase.value != VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE &&
                             app.voiceEngine.hasMicPermission()
                         ) {
-                            app.voiceEngine.startSingleCommandCapture(keepConversationLoop = true, playChime = true)
+                            app.voiceEngine.startSingleCommandCapture(keepConversationLoop = true, playChime = false)
                         }
                     }
                     true
@@ -289,7 +289,7 @@ class JarvisFloatingOrbService : Service() {
                 }
                 else -> {
                     if (app.voiceEngine.hasMicPermission()) {
-                        app.voiceEngine.startSingleCommandCapture(keepConversationLoop = true, playChime = true)
+                        app.voiceEngine.startSingleCommandCapture(keepConversationLoop = true, playChime = false)
                     }
                 }
             }
@@ -508,7 +508,11 @@ class JarvisFloatingOrbService : Service() {
 
     private fun setExpanded(expand: Boolean) {
         isExpanded = expand
-        (application as? JarvisApplication)?.commandCoordinator?.orbLifecycle?.setExpanded(expand)
+        val app = application as? JarvisApplication
+        app?.commandCoordinator?.orbLifecycle?.setExpanded(expand)
+        app?.voiceEngine?.setUserFacingActive(
+            expand || (app.commandCoordinator.isAppInForeground)
+        )
         bubbleCard?.visibility = if (expand) View.VISIBLE else View.GONE
     }
 
