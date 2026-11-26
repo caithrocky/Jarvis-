@@ -204,8 +204,7 @@ class JarvisEngineUnitTest {
         assertEquals("back", backCmd?.primaryArg)
 
         val orbCmd = JarvisSystemAssistant.parseCommand("Open floating orb")
-        assertEquals(SystemIntentKind.FLOATING_ORB, orbCmd?.kind)
-        assertEquals("open", orbCmd?.primaryArg)
+        assertEquals(SystemIntentKind.SWITCH_TO_MINI_ORB, orbCmd?.kind)
 
         val signupCmd = JarvisSystemAssistant.parseCommand("Help me create an account on GitHub with my permission")
         assertEquals(SystemIntentKind.SIGNUP_ASSIST, signupCmd?.kind)
@@ -311,20 +310,17 @@ class JarvisEngineUnitTest {
         val waText = JarvisSystemAssistant.parseCommand("Text Alex hey how are you on WhatsApp")
         assertEquals(SystemIntentKind.TEXT_CONTACT, waText?.kind)
         assertEquals("WhatsApp", waText?.primaryArg)
-        assertEquals("Alex", waText?.secondaryArg)
-        assertEquals("hey how are you", waText?.tertiaryArg)
+        assertEquals("Alex|hey how are you", waText?.secondaryArg)
 
         val snapText = JarvisSystemAssistant.parseCommand("Message Sarah on Snapchat saying meet me at 5")
         assertEquals(SystemIntentKind.TEXT_CONTACT, snapText?.kind)
         assertEquals("Snapchat", snapText?.primaryArg)
-        assertEquals("Sarah", snapText?.secondaryArg)
-        assertEquals("meet me at 5", snapText?.tertiaryArg)
+        assertEquals("Sarah|meet me at 5", snapText?.secondaryArg)
 
         val igDm = JarvisSystemAssistant.parseCommand("DM John on Instagram saying thanks")
         assertEquals(SystemIntentKind.TEXT_CONTACT, igDm?.kind)
         assertEquals("Instagram", igDm?.primaryArg)
-        assertEquals("John", igDm?.secondaryArg)
-        assertEquals("thanks", igDm?.tertiaryArg)
+        assertEquals("John|thanks", igDm?.secondaryArg)
 
         val likePost = JarvisSystemAssistant.parseCommand("Like this post")
         assertEquals(SystemIntentKind.SOCIAL_ACTION, likePost?.kind)
@@ -333,34 +329,34 @@ class JarvisEngineUnitTest {
         val repostX = JarvisSystemAssistant.parseCommand("Repost on X")
         assertEquals(SystemIntentKind.SOCIAL_ACTION, repostX?.kind)
         assertEquals("repost", repostX?.primaryArg)
-        assertEquals("x", repostX?.secondaryArg)
+        assertEquals("X", repostX?.secondaryArg)
 
         val scrollTikTok = JarvisSystemAssistant.parseCommand("Scroll TikTok")
         assertEquals(SystemIntentKind.SOCIAL_ACTION, scrollTikTok?.kind)
-        assertEquals("next", scrollTikTok?.primaryArg)
-        assertEquals("tiktok", scrollTikTok?.secondaryArg)
+        assertEquals("scroll_down", scrollTikTok?.primaryArg)
+        assertEquals("TikTok", scrollTikTok?.secondaryArg)
 
         val nextVideo = JarvisSystemAssistant.parseCommand("Next video")
         assertEquals(SystemIntentKind.SOCIAL_ACTION, nextVideo?.kind)
-        assertEquals("next", nextVideo?.primaryArg)
+        assertEquals("scroll_down", nextVideo?.primaryArg)
 
         val igDms = JarvisSystemAssistant.parseCommand("Open my DMs on Instagram")
         assertEquals(SystemIntentKind.SOCIAL_ACTION, igDms?.kind)
         assertEquals("dms", igDms?.primaryArg)
-        assertEquals("instagram", igDms?.secondaryArg)
+        assertEquals("Instagram", igDms?.secondaryArg)
 
         val studyDevice = JarvisSystemAssistant.parseCommand("Study my device")
         assertEquals(SystemIntentKind.STUDY_DEVICE, studyDevice?.kind)
 
         val showTaps = JarvisSystemAssistant.parseCommand("Show taps")
         assertEquals(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, showTaps?.kind)
-        assertEquals("taps", showTaps?.primaryArg)
-        assertEquals("on", showTaps?.secondaryArg)
+        assertEquals("tap", showTaps?.primaryArg)
+        assertEquals("true", showTaps?.secondaryArg)
 
         val hideHighlights = JarvisSystemAssistant.parseCommand("Hide highlights")
         assertEquals(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, hideHighlights?.kind)
-        assertEquals("highlights", hideHighlights?.primaryArg)
-        assertEquals("off", hideHighlights?.secondaryArg)
+        assertEquals("highlight", hideHighlights?.primaryArg)
+        assertEquals("false", hideHighlights?.secondaryArg)
 
         val checkVoice = JarvisSystemAssistant.parseCommand("Check my voice")
         assertEquals(SystemIntentKind.VERIFY_VOICE, checkVoice?.kind)
@@ -375,18 +371,83 @@ class JarvisEngineUnitTest {
         assertEquals(3, richActions.size)
         assertEquals(SystemIntentKind.TEXT_CONTACT, richActions[0].kind)
         assertEquals("WhatsApp", richActions[0].primaryArg)
-        assertEquals("Alex", richActions[0].secondaryArg)
-        assertEquals("Hey", richActions[0].tertiaryArg)
+        assertEquals("Alex|Hey", richActions[0].secondaryArg)
         assertEquals(SystemIntentKind.SOCIAL_ACTION, richActions[1].kind)
         assertEquals(SystemIntentKind.CLICK_NODE_INDEX, richActions[2].kind)
         assertEquals("3", richActions[2].primaryArg)
 
         val snapshot = com.example.data.remote.NvidiaNimClient.LiveContextSnapshot(
-            activeAppOrScreen = "com.instagram.android",
+            activeScreenSummary = "com.instagram.android",
             deviceKnowledgeSummary = "18 apps studied",
             indexedScreenMap = "[#1] Like (clickable)"
         )
         assertEquals("18 apps studied", snapshot.deviceKnowledgeSummary)
         assertEquals("[#1] Like (clickable)", snapshot.indexedScreenMap)
+    }
+
+    @Test
+    fun `system assistant parses mini orb lifecycle, mute, app install, notifications, media, news, camera, and action tags`() {
+        val toMini = JarvisSystemAssistant.parseCommand("Switch to Mini Orb")
+        assertEquals(SystemIntentKind.SWITCH_TO_MINI_ORB, toMini?.kind)
+
+        val toFull = JarvisSystemAssistant.parseCommand("Open full app")
+        assertEquals(SystemIntentKind.OPEN_FULL_APP, toFull?.kind)
+
+        val stayHere = JarvisSystemAssistant.parseCommand("Stay here")
+        assertEquals(SystemIntentKind.ORB_CONTROL, stayHere?.kind)
+        assertEquals("stay_here", stayHere?.primaryArg)
+
+        val sleepOrb = JarvisSystemAssistant.parseCommand("Close the orb")
+        assertEquals(SystemIntentKind.ORB_CONTROL, sleepOrb?.kind)
+        assertEquals("sleep", sleepOrb?.primaryArg)
+
+        val muteCmd = JarvisSystemAssistant.parseCommand("Mute mic")
+        assertEquals(SystemIntentKind.MUTE_MIC, muteCmd?.kind)
+        assertEquals("mute", muteCmd?.primaryArg)
+
+        val unmuteCmd = JarvisSystemAssistant.parseCommand("Unmute")
+        assertEquals(SystemIntentKind.MUTE_MIC, unmuteCmd?.kind)
+        assertEquals("unmute", unmuteCmd?.primaryArg)
+
+        val installCmd = JarvisSystemAssistant.parseCommand("Install Spotify")
+        assertEquals(SystemIntentKind.INSTALL_APP, installCmd?.kind)
+        assertEquals("Spotify", installCmd?.primaryArg)
+
+        val notifCmd = JarvisSystemAssistant.parseCommand("Check my notifications")
+        assertEquals(SystemIntentKind.READ_NOTIFICATIONS, notifCmd?.kind)
+
+        val missedCallsCmd = JarvisSystemAssistant.parseCommand("Any missed calls")
+        assertEquals(SystemIntentKind.READ_NOTIFICATIONS, missedCallsCmd?.kind)
+
+        val playSpotify = JarvisSystemAssistant.parseCommand("Play jazz on Spotify")
+        assertEquals(SystemIntentKind.MEDIA_PLAY_SEARCH, playSpotify?.kind)
+        assertEquals("jazz", playSpotify?.primaryArg)
+        assertEquals("Spotify", playSpotify?.secondaryArg)
+
+        val newsCmd = JarvisSystemAssistant.parseCommand("Latest Kenyan news")
+        assertEquals(SystemIntentKind.NEWS_RESEARCH, newsCmd?.kind)
+
+        val selfieCmd = JarvisSystemAssistant.parseCommand("Take a selfie")
+        assertEquals(SystemIntentKind.OPEN_CAMERA, selfieCmd?.kind)
+        assertEquals("selfie", selfieCmd?.primaryArg)
+
+        val reelsCmd = JarvisSystemAssistant.parseCommand("Open Reels")
+        assertEquals(SystemIntentKind.SOCIAL_ACTION, reelsCmd?.kind)
+        assertEquals("reels", reelsCmd?.primaryArg)
+
+        val (stripped, actions) = JarvisSystemAssistant.extractAndStripAiActions(
+            "Handling it now, Sir. [ACTION:FLOATING_ORB|open] [ACTION:MINI_ORB|open] [ACTION:INSTALL_APP|Spotify] [ACTION:READ_NOTIFICATIONS] [ACTION:NEWS_RESEARCH|Kenya] [ACTION:CAMERA|selfie]"
+        )
+        assertEquals("Handling it now, Sir.", stripped)
+        assertEquals(6, actions.size)
+        assertEquals(SystemIntentKind.FLOATING_ORB, actions[0].kind)
+        assertEquals(SystemIntentKind.SWITCH_TO_MINI_ORB, actions[1].kind)
+        assertEquals(SystemIntentKind.INSTALL_APP, actions[2].kind)
+        assertEquals("Spotify", actions[2].primaryArg)
+        assertEquals(SystemIntentKind.READ_NOTIFICATIONS, actions[3].kind)
+        assertEquals(SystemIntentKind.NEWS_RESEARCH, actions[4].kind)
+        assertEquals("Kenya", actions[4].primaryArg)
+        assertEquals(SystemIntentKind.OPEN_CAMERA, actions[5].kind)
+        assertEquals("selfie", actions[5].primaryArg)
     }
 }

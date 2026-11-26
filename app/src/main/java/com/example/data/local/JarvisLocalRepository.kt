@@ -42,6 +42,12 @@ class JarvisLocalRepository(private val db: JarvisDatabase) {
         db.memoryDao().insertMemory(MemoryFactEntity(category = category, summary = summary))
     }
 
+    suspend fun updateMemory(id: Long, summary: String) {
+        if (summary.isNotBlank()) {
+            db.memoryDao().updateMemoryById(id, summary.trim())
+        }
+    }
+
     suspend fun deleteMemory(id: Long) = db.memoryDao().deleteMemoryById(id)
 
     suspend fun clearAllMemories() = db.memoryDao().clearAllMemories()

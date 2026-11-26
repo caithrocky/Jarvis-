@@ -3,11 +3,13 @@ package com.example
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
+import com.example.assistant.AppDiscoveryEngine
 import com.example.assistant.DeviceLearningEngine
 import com.example.assistant.JarvisCommandCoordinator
 import com.example.data.local.JarvisDatabase
 import com.example.data.local.JarvisLocalRepository
 import com.example.data.local.JarvisPreferencesRepository
+import com.example.data.remote.NewsAndResearchEngine
 import com.example.data.remote.NvidiaMagpieTtsClient
 import com.example.data.remote.NvidiaNimClient
 import com.example.data.remote.WebKnowledgeClient
@@ -35,6 +37,10 @@ class JarvisApplication : Application() {
     lateinit var credentialStore: SecureCredentialStore
         private set
     lateinit var webClient: WebKnowledgeClient
+        private set
+    lateinit var appDiscoveryEngine: AppDiscoveryEngine
+        private set
+    lateinit var newsEngine: NewsAndResearchEngine
         private set
     lateinit var nimClient: NvidiaNimClient
         private set
@@ -66,6 +72,8 @@ class JarvisApplication : Application() {
         credentialStore = SecureCredentialStore(this)
         SecretsConfig.attachRuntimeStore(credentialStore)
         webClient = WebKnowledgeClient(httpClient)
+        appDiscoveryEngine = AppDiscoveryEngine(httpClient, webClient)
+        newsEngine = NewsAndResearchEngine(webClient)
         nimClient = NvidiaNimClient(httpClient)
         magpieTtsClient = NvidiaMagpieTtsClient(httpClient)
         voiceEngine = JarvisVoiceEngine(this, magpieTtsClient, credentialStore)
@@ -79,7 +87,9 @@ class JarvisApplication : Application() {
             webClient = webClient,
             nimClient = nimClient,
             voiceEngine = voiceEngine,
-            deviceLearningEngine = deviceLearningEngine
+            deviceLearningEngine = deviceLearningEngine,
+            appDiscoveryEngine = appDiscoveryEngine,
+            newsEngine = newsEngine
         )
         commandCoordinator.attachVoiceEngineCallbacks()
 

@@ -76,9 +76,9 @@ class VoiceBiometricAnalyzerTest {
         assertEquals(SpeakerMatchState.VERIFIED_OWNER, healthyResult.state)
         assertTrue(healthyResult.confidence >= 0.78f)
 
-        // 2. Owner with flu / hoarse throat (~22% lower fundamental pitch + slight breathy noise, preserved vocal-tract formants)
+        // 2. Owner with flu / hoarse throat (~31% lower fundamental pitch + slight breathy noise, preserved vocal-tract formants)
         val fluPcm = synthesizeVoicePcm(
-            fundamentalHz = 109.0,
+            fundamentalHz = 96.0,
             fundamentalAmp = 0.68,
             formants = ownerFormants,
             breathNoiseAmp = 0.04
@@ -89,8 +89,20 @@ class VoiceBiometricAnalyzerTest {
             profile = enrolledProfile,
             fluToleranceEnabled = true
         )
-        assertEquals(SpeakerMatchState.VERIFIED_VOCAL_SHIFT, fluResult.state)
+        assertEquals(
+            "Expected vocal shift verification, got ${fluResult.state} (conf=${fluResult.confidence}, formant=${fluResult.formantSimilarity}, pitchDiff=${fluResult.pitchDeviationRatio})",
+            SpeakerMatchState.VERIFIED_VOCAL_SHIFT,
+            fluResult.state
+        )
         assertTrue(fluResult.formantSimilarity >= 0.87f)
+
+        // When flu adaptation is disabled, heavy pitch drop should NOT match
+        val strictResult = VoiceBiometricAnalyzer.verifySpeaker(
+            sample = fluFeatures,
+            profile = enrolledProfile,
+            fluToleranceEnabled = false
+        )
+        assertEquals(SpeakerMatchState.UNRECOGNIZED_SPEAKER, strictResult.state)
 
         // Adapt baseline smoothly while keeping immutable anchorBands intact
         val adapted = VoiceBiometricAnalyzer.adaptProfile(enrolledProfile, fluFeatures, fluResult.state)

@@ -549,6 +549,11 @@ class JarvisAccessibilityService : AccessibilityService() {
                 if (rect != null) tapBoundsCenter(rect, "Home")
                 else ScreenActionResult(false, "No Home feed tab found on this screen, Sir.")
             }
+            "reels" -> {
+                val rect = findClickableByKeywords(root, listOf("reels", "shorts", "video"))
+                if (rect != null) tapBoundsCenter(rect, "Reels")
+                else ScreenActionResult(false, "No Reels tab found on this screen, Sir.")
+            }
             else -> {
                 if (targetArg.isNotBlank()) clickNodeByText(targetArg) else clickNodeByText(action)
             }
@@ -926,6 +931,39 @@ class JarvisAccessibilityService : AccessibilityService() {
         val stroke = GestureDescription.StrokeDescription(path, 0L, 260L)
         val ok = dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
         return ScreenActionResult(ok, if (ok) "Swiped ${if (toLeft) "left" else "right"}, Sir." else "Unable to swipe horizontally, Sir.")
+    }
+
+    fun doubleTapBoundsCenter(rect: Rect, label: String = ""): ScreenActionResult {
+        val cx = rect.centerX().toFloat().coerceAtLeast(1f)
+        val cy = rect.centerY().toFloat().coerceAtLeast(1f)
+        overlayManager?.showTapRipple(cx, cy, label.ifBlank { "Double-Tap" })
+        val p1 = Path().apply { moveTo(cx, cy) }
+        val p2 = Path().apply { moveTo(cx + 2f, cy + 2f) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(p1, 0L, 45L))
+            .addStroke(GestureDescription.StrokeDescription(p2, 110L, 45L))
+            .build()
+        val ok = dispatchGesture(gesture, null, null)
+        return ScreenActionResult(ok, if (ok) "Double-tapped ${label.ifBlank { "target" }}, Sir." else "Could not double-tap target, Sir.", rect)
+    }
+
+    fun longPressBoundsCenter(rect: Rect, label: String = ""): ScreenActionResult {
+        val cx = rect.centerX().toFloat().coerceAtLeast(1f)
+        val cy = rect.centerY().toFloat().coerceAtLeast(1f)
+        overlayManager?.showHighlightBoxes(listOf(HighlightTarget(rect, label = label.ifBlank { "Hold" })), 1500L)
+        val path = Path().apply { moveTo(cx, cy) }
+        val stroke = GestureDescription.StrokeDescription(path, 0L, 620L)
+        val ok = dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+        return ScreenActionResult(ok, if (ok) "Long-pressed ${label.ifBlank { "item" }}, Sir." else "Could not long-press item, Sir.", rect)
+    }
+
+    fun verifyScreenChanged(previousSummary: String, expectedKeywords: List<String> = emptyList()): Boolean {
+        val current = readScreenSummary()
+        val lower = current.lowercase(Locale.US)
+        if (expectedKeywords.isNotEmpty() && expectedKeywords.any { lower.contains(it.lowercase(Locale.US)) }) {
+            return true
+        }
+        return current != previousSummary
     }
 
     fun performGlobalNavigation(actionName: String): ScreenActionResult {

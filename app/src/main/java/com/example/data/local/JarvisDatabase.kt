@@ -169,6 +169,9 @@ interface MemoryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMemory(memory: MemoryFactEntity): Long
 
+    @Query("UPDATE memory_facts SET summary = :summary WHERE id = :id")
+    suspend fun updateMemoryById(id: Long, summary: String)
+
     @Query("DELETE FROM memory_facts WHERE id = :id")
     suspend fun deleteMemoryById(id: Long)
 

@@ -3,10 +3,76 @@ package com.example.domain.model
 enum class OrbState(val label: String) {
     IDLE("STANDBY"),
     LISTENING("LISTENING"),
-    PROCESSING("ANALYZING"),
+    UNDERSTANDING("UNDERSTANDING"),
+    PROCESSING("PROCESSING"),
     SPEAKING("SPEAKING"),
+    EXECUTING("EXECUTING"),
+    SUCCESS("COMPLETED"),
+    ERROR("ATTENTION"),
     ALERT("ALERT"),
     OFFLINE("OFFLINE")
+}
+
+enum class MiniOrbVisualState(val label: String) {
+    STANDBY("Standby"),
+    WAKE_DETECTED("Awake"),
+    LISTENING("Listening"),
+    UNDERSTANDING("Understanding"),
+    SPEAKING("Speaking"),
+    EXECUTING("Executing"),
+    SUCCESS("Done"),
+    ERROR("Alert"),
+    MUTED("Muted")
+}
+
+enum class AssistantUiMode {
+    FULL_APP,
+    MINI_ORB
+}
+
+enum class TaskStage(val label: String) {
+    IDLE("Standby"),
+    RECOGNIZING("Listening"),
+    UNDERSTANDING("Understanding"),
+    PLANNING("Planning"),
+    PERMISSION_CHECK("Permission Check"),
+    EXECUTING("Executing"),
+    VERIFYING("Verifying"),
+    COMPLETED("Completed"),
+    FAILED("Failed"),
+    CANCELLED("Stopped")
+}
+
+data class TaskExecutionProgress(
+    val stage: TaskStage = TaskStage.IDLE,
+    val title: String = "",
+    val detail: String = "",
+    val stepIndex: Int = 0,
+    val totalSteps: Int = 0,
+    val timestampMs: Long = System.currentTimeMillis()
+) {
+    val isBusy: Boolean
+        get() = stage in setOf(
+            TaskStage.RECOGNIZING,
+            TaskStage.UNDERSTANDING,
+            TaskStage.PLANNING,
+            TaskStage.PERMISSION_CHECK,
+            TaskStage.EXECUTING,
+            TaskStage.VERIFYING
+        )
+
+    val fraction: Float
+        get() = when {
+            stage == TaskStage.COMPLETED -> 1f
+            totalSteps > 0 -> (stepIndex.toFloat() / totalSteps.toFloat()).coerceIn(0.1f, 0.98f)
+            stage == TaskStage.RECOGNIZING -> 0.15f
+            stage == TaskStage.UNDERSTANDING -> 0.30f
+            stage == TaskStage.PLANNING -> 0.45f
+            stage == TaskStage.PERMISSION_CHECK -> 0.55f
+            stage == TaskStage.EXECUTING -> 0.72f
+            stage == TaskStage.VERIFYING -> 0.88f
+            else -> 0f
+        }
 }
 
 enum class MarketAssetClass(val label: String) {

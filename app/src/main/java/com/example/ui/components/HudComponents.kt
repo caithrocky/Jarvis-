@@ -47,17 +47,28 @@ fun HudGlassCard(
     val jc = LocalJarvisColors.current
     Surface(
         modifier = modifier,
-        shape = MaterialTheme.shapes.medium,
+        shape = MaterialTheme.shapes.large,
         color = jc.glassSurface,
-        border = BorderStroke(1.dp, borderColor),
-        tonalElevation = 2.dp
+        border = BorderStroke(
+            width = 0.85.dp,
+            brush = Brush.linearGradient(
+                listOf(
+                    borderColor.copy(alpha = 0.72f),
+                    jc.softViolet.copy(alpha = 0.16f),
+                    jc.softTurquoise.copy(alpha = 0.28f)
+                )
+            )
+        ),
+        shadowElevation = 6.dp,
+        tonalElevation = 1.dp
     ) {
         Box(
             modifier = Modifier
                 .background(
                     Brush.verticalGradient(
                         listOf(
-                            jc.electricBlue.copy(alpha = 0.05f),
+                            jc.electricBlue.copy(alpha = 0.045f),
+                            jc.softViolet.copy(alpha = 0.02f),
                             Color.Transparent
                         )
                     )

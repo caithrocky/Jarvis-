@@ -1,21 +1,27 @@
 package com.example.assistant
 
 import android.content.Context
+import android.content.Intent
 import android.graphics.Color
 import android.provider.Settings
+import com.example.MainActivity
 import com.example.data.local.JarvisLocalRepository
 import com.example.data.local.JarvisPreferencesRepository
 import com.example.data.local.JarvisUserSettings
 import com.example.data.remote.JarvisAiResult
+import com.example.data.remote.NewsAndResearchEngine
 import com.example.data.remote.NvidiaNimClient
 import com.example.data.remote.WebKnowledgeClient
 import com.example.domain.model.JarvisChoiceActivity
+import com.example.domain.model.TaskExecutionProgress
+import com.example.domain.model.TaskStage
 import com.example.security.SecureCredentialStore
 import com.example.voice.JarvisFloatingOrbService
 import com.example.voice.JarvisVoiceEngine
 import com.example.voice.SpeakerMatchState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -47,7 +53,7 @@ private data class PendingMessageSession(
 
 /**
  * Shared command, messaging, autonomous UI agent & AI execution brain used by both
- * MainActivity/ViewModel and the voice-first Floating Mini-Orb plugin.
+ * MainActivity/ViewModel (Mode A) and the voice-first Floating Mini-Orb plugin (Mode B).
  */
 class JarvisCommandCoordinator(
     private val context: Context,
@@ -57,9 +63,14 @@ class JarvisCommandCoordinator(
     private val webClient: WebKnowledgeClient,
     private val nimClient: NvidiaNimClient,
     private val voiceEngine: JarvisVoiceEngine,
-    private val deviceLearningEngine: DeviceLearningEngine
+    private val deviceLearningEngine: DeviceLearningEngine,
+    private val appDiscoveryEngine: AppDiscoveryEngine,
+    private val newsEngine: NewsAndResearchEngine
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    val sessionManager = AssistantSessionManager()
+    val orbLifecycle = OrbLifecycleController(scope)
 
     @Volatile
     var isAppInForeground: Boolean = false
@@ -77,13 +88,15 @@ class JarvisCommandCoordinator(
     @Volatile
     private var abortRequested: Boolean = false
 
+    private var taskResetJob: Job? = null
+
     private val _isProcessing = MutableStateFlow(false)
     val isProcessing: StateFlow<Boolean> = _isProcessing.asStateFlow()
 
     private val _streamingReply = MutableStateFlow("")
     val streamingReply: StateFlow<String> = _streamingReply.asStateFlow()
 
-    private val _lastAssistantReply = MutableStateFlow("Tap the orb to speak, Sir — always listening under your command.")
+    private val _lastAssistantReply = MutableStateFlow("Always listening for you, Sir — speak naturally anytime.")
     val lastAssistantReply: StateFlow<String> = _lastAssistantReply.asStateFlow()
 
     private val _lastUserPrompt = MutableStateFlow("")
@@ -95,6 +108,9 @@ class JarvisCommandCoordinator(
     private val _pendingConfirmationSummary = MutableStateFlow<String?>(null)
     val pendingConfirmationSummary: StateFlow<String?> = _pendingConfirmationSummary.asStateFlow()
 
+    private val _taskProgress = MutableStateFlow(TaskExecutionProgress())
+    val taskProgress: StateFlow<TaskExecutionProgress> = _taskProgress.asStateFlow()
+
     private val _navigationEvents = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val navigationEvents: SharedFlow<String> = _navigationEvents.asSharedFlow()
 
@@ -102,6 +118,7 @@ class JarvisCommandCoordinator(
         scope.launch {
             prefsRepo.settingsFlow.collectLatest { settings ->
                 voiceEngine.setFluToleranceEnabled(settings.voiceFluAdaptationEnabled)
+                orbLifecycle.setInactivityTimeoutSeconds(settings.orbInactivityTimeoutSeconds)
                 JarvisAccessibilityService.activeInstance()?.applyVisualFeedbackSettings(
                     showTap = settings.showTapIndicator,
                     showHighlight = settings.showHighlightIndicator,
@@ -113,6 +130,7 @@ class JarvisCommandCoordinator(
 
     fun onForegroundChanged(inForeground: Boolean) {
         isAppInForeground = inForeground
+        sessionManager.updateForeground(inForeground)
         scope.launch {
             val settings = prefsRepo.settingsFlow.first()
             if (!inForeground) {
@@ -128,17 +146,31 @@ class JarvisCommandCoordinator(
 
     fun attachVoiceEngineCallbacks() {
         voiceEngine.setCallbacks(
-            onWake = {
+            onWake = { remainder ->
                 scope.launch {
-                    localRepo.logAiActivity("WAKE_WORD", "Activated via \"Hey JARVIS\"")
+                    localRepo.logAiActivity("WAKE_WORD", "Activated via contextual \"Hey JARVIS\"")
+                    orbLifecycle.triggerWakePulse()
                     val settings = prefsRepo.settingsFlow.first()
-                    if (!isAppInForeground && settings.floatingOrbEnabled && Settings.canDrawOverlays(context)) {
-                        JarvisFloatingOrbService.start(context, expandBubble = true)
+                    val decision = sessionManager.decideWakeTransition(
+                        floatingOrbEnabled = settings.floatingOrbEnabled,
+                        overlayPermissionGranted = Settings.canDrawOverlays(context)
+                    )
+                    // Rule 2.2 / 2.4: Never launch Mini Orb if Full App is open; launch it expanded when closed.
+                    if (decision.shouldOpenMiniOrb) {
+                        JarvisFloatingOrbService.start(
+                            context,
+                            expandBubble = true,
+                            startListening = remainder.isBlank()
+                        )
                     }
                 }
             },
             onCommand = { spokenText ->
                 submitQuery(spokenText, fromVoice = true)
+            },
+            onBargeIn = {
+                orbLifecycle.touchActivity()
+                updateTaskProgress(TaskStage.RECOGNIZING, "Interrupted", "Listening to you, Sir...")
             }
         )
     }
@@ -152,7 +184,37 @@ class JarvisCommandCoordinator(
         _isProcessing.value = false
         JarvisAccessibilityService.activeInstance()?.clearVisualOverlays()
         voiceEngine.interruptSpeech()
+        updateTaskProgress(TaskStage.CANCELLED, "Stopped", "Standing down, Sir", autoClear = true)
         _lastAssistantReply.value = "Standing down right away, Sir."
+    }
+
+    private fun updateTaskProgress(
+        stage: TaskStage,
+        title: String,
+        detail: String,
+        stepIndex: Int = 0,
+        totalSteps: Int = 0,
+        autoClear: Boolean = false
+    ) {
+        taskResetJob?.cancel()
+        _taskProgress.value = TaskExecutionProgress(
+            stage = stage,
+            title = title,
+            detail = detail,
+            stepIndex = stepIndex,
+            totalSteps = totalSteps
+        )
+        if (stage == TaskStage.COMPLETED) {
+            orbLifecycle.triggerSuccessPulse()
+        } else if (stage == TaskStage.FAILED) {
+            orbLifecycle.triggerErrorPulse()
+        }
+        if (autoClear) {
+            taskResetJob = scope.launch {
+                delay(1800L)
+                _taskProgress.value = TaskExecutionProgress()
+            }
+        }
     }
 
     fun submitQuery(
@@ -162,6 +224,7 @@ class JarvisCommandCoordinator(
         val prompt = rawPrompt.trim()
         if (prompt.isBlank()) return
         val lower = prompt.lowercase(Locale.US)
+        orbLifecycle.touchActivity()
 
         if (lower == "stop" || lower == "abort" || lower == "stop jarvis" || lower == "cancel action") {
             abortAllPendingActions()
@@ -174,6 +237,8 @@ class JarvisCommandCoordinator(
 
         abortRequested = false
         _lastUserPrompt.value = prompt
+        updateTaskProgress(TaskStage.UNDERSTANDING, "Analyzing Request", prompt.take(48))
+
         scope.launch {
             val currentSettings = prefsRepo.settingsFlow.first()
             voiceEngine.configureVoice(
@@ -194,11 +259,12 @@ class JarvisCommandCoordinator(
                 isVoice = fromVoice
             )
 
-            // 0. Check if we are in an active interactive messaging session (disambiguation / message entry / send confirm)
+            // 0. Active interactive messaging session (disambiguation / message entry / send confirm)
             val activeMsgSession = pendingMessageSession
             if (activeMsgSession != null && System.currentTimeMillis() - activeMsgSession.createdAtMs < 180_000L) {
                 val handledReply = handlePendingMessageSessionTurn(prompt, activeMsgSession, currentSettings, fromVoice)
                 if (handledReply != null) {
+                    updateTaskProgress(TaskStage.COMPLETED, handledReply.second, handledReply.first.take(64), autoClear = true)
                     finishDirectReply(handledReply.first, handledReply.second, currentSettings, fromVoice)
                     return@launch
                 }
@@ -207,26 +273,35 @@ class JarvisCommandCoordinator(
                 _pendingConfirmationSummary.value = null
             }
 
-            // 1. If we previously asked Sir for a hard-to-find website link, open it immediately in Chrome
+            // 1. User supplied a previously requested direct URL
             val pendingSite = awaitingWebsiteLinkFor
             val suppliedUrl = JarvisSystemAssistant.extractDirectUrlOrDomain(prompt)
             if (pendingSite != null && suppliedUrl != null) {
                 awaitingWebsiteLinkFor = null
+                updateTaskProgress(TaskStage.EXECUTING, "Opening Chrome", suppliedUrl)
                 val openRes = JarvisSystemAssistant.openWebsiteInChrome(context, suppliedUrl)
+                updateTaskProgress(
+                    if (openRes.launchedTarget) TaskStage.COMPLETED else TaskStage.FAILED,
+                    openRes.actionLabel,
+                    suppliedUrl,
+                    autoClear = true
+                )
                 finishDirectReply(openRes.replyText, openRes.actionLabel, currentSettings, fromVoice)
                 return@launch
             }
 
-            // 2. Fast deterministic handler for Messaging, Social, Apps, Settings, Voice ID, Learning & Credentials
+            // 2. Deterministic direct command routing (mode switch, apps, Play Store, notifications, news, messaging, social, settings)
             val directMatch = tryHandleDirectCommand(prompt, currentSettings, fromVoice)
             if (directMatch != null) {
+                updateTaskProgress(TaskStage.COMPLETED, directMatch.second, directMatch.first.take(64), autoClear = true)
                 finishDirectReply(directMatch.first, directMatch.second, currentSettings, fromVoice)
                 return@launch
             }
 
-            // 3. Autonomous AI Reasoning + Indexed Live Screen Map + Self-Learned Knowledge + Web Search
+            // 3. Autonomous AI Reasoning + Indexed Screen Map + Self-Learned Knowledge + Web Search + Streaming TTS
             _isProcessing.value = true
             _streamingReply.value = ""
+            updateTaskProgress(TaskStage.PLANNING, "Thinking", "Consulting AI & live context...")
 
             val svc = JarvisAccessibilityService.activeInstance()
             val (indexedMap, _) = svc?.readRichScreenMap(maxNodes = 32) ?: ("" to emptyList())
@@ -248,6 +323,12 @@ class JarvisCommandCoordinator(
                 indexedScreenMap = indexedMap.takeIf { it.isNotBlank() }
             )
 
+            // Prepare sentence-by-sentence streaming voice pipeline if speech output is active
+            val allowStreamingVoice = currentSettings.voiceOutputEnabled && !voiceEngine.isMuted.value
+            var streamSpeechToken = -1
+            var streamedSentenceCursor = 0
+            var sawBracketInStream = false
+
             val result = nimClient.chatWithStreaming(
                 userPrompt = prompt,
                 modelId = currentSettings.selectedModelId,
@@ -257,11 +338,33 @@ class JarvisCommandCoordinator(
                 onPartialToken = { partial ->
                     val (visiblePartial, _) = JarvisSystemAssistant.extractAndStripAiActions(partial)
                     _streamingReply.value = visiblePartial
+
+                    if (allowStreamingVoice && !sawBracketInStream) {
+                        if (partial.contains('[')) {
+                            sawBracketInStream = true
+                        } else if (visiblePartial.length > streamedSentenceCursor) {
+                            val unseen = visiblePartial.substring(streamedSentenceCursor)
+                            val sentenceBreak = findSentenceBoundary(unseen)
+                            if (sentenceBreak > 0) {
+                                val sentence = unseen.substring(0, sentenceBreak).trim()
+                                streamedSentenceCursor += sentenceBreak
+                                if (sentence.length >= 6) {
+                                    if (streamSpeechToken == -1) {
+                                        streamSpeechToken = voiceEngine.beginStreamingSpeechSession()
+                                    }
+                                    voiceEngine.enqueueStreamingSpeechSentence(streamSpeechToken, sentence)
+                                }
+                            }
+                        }
+                    }
                 }
             )
 
             val replyText: String
             val toolSummary: String?
+            var usedActionOverrideNote = false
+            var taskFailed = false
+
             when (result) {
                 is JarvisAiResult.Success -> {
                     val (cleanedReply, parsedAiActions) = JarvisSystemAssistant.extractAndStripAiActions(result.replyText)
@@ -274,10 +377,63 @@ class JarvisCommandCoordinator(
                     val actionNotes = mutableListOf<String>()
                     if (webContext != null) executedActionLabels.add("Web Search")
 
+                    if (actionsToRun.isNotEmpty()) {
+                        updateTaskProgress(
+                            TaskStage.EXECUTING,
+                            "Executing Actions",
+                            "${actionsToRun.size} step(s) queued",
+                            stepIndex = 0,
+                            totalSteps = actionsToRun.size
+                        )
+                    }
+
                     for ((index, cmd) in actionsToRun.withIndex()) {
                         if (abortRequested) break
+                        updateTaskProgress(
+                            TaskStage.EXECUTING,
+                            cmd.kind.name.replace('_', ' '),
+                            cmd.primaryArg.ifBlank { prompt.take(36) },
+                            stepIndex = index + 1,
+                            totalSteps = actionsToRun.size
+                        )
                         val hasMoreSteps = index < actionsToRun.lastIndex
                         when (cmd.kind) {
+                            SystemIntentKind.SWITCH_TO_MINI_ORB -> {
+                                val res = handleSwitchToMiniOrb()
+                                executedActionLabels.add(res.second)
+                                actionNotes.add(res.first)
+                            }
+                            SystemIntentKind.OPEN_FULL_APP -> {
+                                val res = handleOpenFullApp()
+                                executedActionLabels.add(res.second)
+                                actionNotes.add(res.first)
+                            }
+                            SystemIntentKind.ORB_CONTROL -> {
+                                val res = handleOrbControl(cmd.primaryArg)
+                                executedActionLabels.add(res.second)
+                                actionNotes.add(res.first)
+                            }
+                            SystemIntentKind.MUTE_MIC -> {
+                                val mute = cmd.primaryArg == "mute"
+                                voiceEngine.setMuted(mute)
+                                executedActionLabels.add("Mic Control")
+                                actionNotes.add(if (mute) "Microphone muted, Sir." else "Microphone unmuted, Sir.")
+                            }
+                            SystemIntentKind.INSTALL_APP -> {
+                                val res = handleAppInstallDiscovery(cmd.primaryArg)
+                                executedActionLabels.add(res.second)
+                                actionNotes.add(res.first)
+                            }
+                            SystemIntentKind.READ_NOTIFICATIONS -> {
+                                val res = handleReadNotifications(prompt)
+                                executedActionLabels.add(res.second)
+                                actionNotes.add(res.first)
+                            }
+                            SystemIntentKind.NEWS_RESEARCH -> {
+                                val briefing = newsEngine.fetchBriefing(cmd.primaryArg.ifBlank { prompt })
+                                executedActionLabels.add("News Research")
+                                actionNotes.add(briefing.headlinesSummary)
+                            }
                             SystemIntentKind.TEXT_CONTACT -> {
                                 val res = executeCrossPlatformTextFlow(cmd, currentSettings, fromVoice)
                                 executedActionLabels.add(res.second)
@@ -286,7 +442,7 @@ class JarvisCommandCoordinator(
                             SystemIntentKind.SOCIAL_ACTION -> {
                                 val res = executeSocialNavigationFlow(cmd)
                                 executedActionLabels.add(res.second)
-                                if (!res.first.isBlank()) actionNotes.add(res.first)
+                                if (res.first.isNotBlank()) actionNotes.add(res.first)
                             }
                             SystemIntentKind.AUTONOMOUS_TASK -> {
                                 val autoOutcome = runAutonomousUiTask(cmd.primaryArg.ifBlank { prompt }, currentSettings)
@@ -345,11 +501,22 @@ class JarvisCommandCoordinator(
                     }
 
                     val baseReply = cleanedReply.ifBlank { "Right away, Sir." }
-                    replyText = if (actionNotes.isNotEmpty()) {
-                        actionNotes.last()
+                    if (actionNotes.isNotEmpty()) {
+                        usedActionOverrideNote = true
+                        replyText = actionNotes.last()
                     } else {
-                        baseReply
+                        replyText = baseReply
                     }
+
+                    // Flush remaining prose into streaming speech session if no action override replaced it
+                    if (allowStreamingVoice && streamSpeechToken != -1 && !usedActionOverrideNote) {
+                        val remaining = cleanedReply.drop(streamedSentenceCursor.coerceIn(0, cleanedReply.length)).trim()
+                        if (remaining.isNotBlank()) {
+                            voiceEngine.enqueueStreamingSpeechSentence(streamSpeechToken, remaining)
+                        }
+                        voiceEngine.finishStreamingSpeechSession(streamSpeechToken, followUpListen = fromVoice)
+                    }
+
                     val combinedTools = (result.toolCallsExecuted + executedActionLabels).distinct()
                     toolSummary = combinedTools.takeIf { it.isNotEmpty() }?.joinToString(", ")
                     if (currentSettings.memoryEnabled && result.suggestedMemoryFact != null) {
@@ -362,6 +529,7 @@ class JarvisCommandCoordinator(
                     replyText = if (onlineFallback.isNotBlank()) {
                         "From the internet, Sir: $onlineFallback"
                     } else {
+                        taskFailed = true
                         result.message
                     }
                     toolSummary = if (onlineFallback.isNotBlank()) "Internet Search" else "Setup Needed"
@@ -371,6 +539,7 @@ class JarvisCommandCoordinator(
                     replyText = if (onlineFallback.isNotBlank()) {
                         "I had trouble reaching NVIDIA NIM, Sir, so I pulled this straight from the web: $onlineFallback"
                     } else {
+                        taskFailed = true
                         result.message
                     }
                     toolSummary = if (onlineFallback.isNotBlank()) "Internet Fallback" else "NIM Error"
@@ -388,11 +557,99 @@ class JarvisCommandCoordinator(
 
             _isProcessing.value = false
             _streamingReply.value = ""
+            updateTaskProgress(
+                stage = if (taskFailed) TaskStage.FAILED else TaskStage.COMPLETED,
+                title = toolSummary ?: "Complete",
+                detail = replyText.take(64),
+                autoClear = true
+            )
 
-            if (currentSettings.voiceOutputEnabled) {
-                voiceEngine.speak(replyText.take(520), followUpListen = fromVoice)
+            if (allowStreamingVoice) {
+                val handledByStream = streamSpeechToken != -1 && !usedActionOverrideNote && !taskFailed
+                if (!handledByStream) {
+                    if (streamSpeechToken != -1) {
+                        voiceEngine.interruptSpeech()
+                    }
+                    voiceEngine.speak(replyText.take(520), followUpListen = fromVoice)
+                }
             }
         }
+    }
+
+    private fun findSentenceBoundary(text: String): Int {
+        for (i in text.indices) {
+            val ch = text[i]
+            if (ch == '.' || ch == '!' || ch == '?') {
+                val next = text.getOrNull(i + 1)
+                if (next == ' ' || next == '\n') {
+                    return i + 2
+                }
+            }
+        }
+        return -1
+    }
+
+    private fun handleSwitchToMiniOrb(): Pair<String, String> {
+        if (!Settings.canDrawOverlays(context)) {
+            return "To switch into the floating Mini Orb, allow 'Display over other apps' on Home or in Settings first, Sir." to "Overlay Permission Needed"
+        }
+        manualOrbPinned = true
+        JarvisFloatingOrbService.start(context, expandBubble = true, startListening = voiceEngine.hasMicPermission())
+        sessionManager.onExplicitSwitchToMiniOrb()
+        localRepo.logAiActivitySyncSafe("MODE_SWITCH", "Switched to Floating Mini Orb")
+        return "Switching to Mini Orb right now, Sir — I'm floating right beside you." to "Mini Orb Active"
+    }
+
+    private fun handleOpenFullApp(): Pair<String, String> {
+        manualOrbPinned = false
+        orbLifecycle.setStayAwakePinned(false)
+        sessionManager.onExplicitSwitchToFullApp()
+        JarvisFloatingOrbService.stop(context)
+        val intent = Intent(context, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        runCatching { context.startActivity(intent) }
+        return "Opening the full JARVIS application now, Sir." to "Full App"
+    }
+
+    private fun handleOrbControl(modeArg: String): Pair<String, String> {
+        return if (modeArg == "stay_here") {
+            orbLifecycle.setStayAwakePinned(true)
+            sessionManager.setStayAwakePinned(true)
+            "Got it, Sir — I'll stay awake and keep listening right here." to "Orb Pinned"
+        } else {
+            manualOrbPinned = false
+            orbLifecycle.setStayAwakePinned(false)
+            sessionManager.setStayAwakePinned(false)
+            JarvisFloatingOrbService.stop(context)
+            "Going to quiet standby, Sir. Just say \"Hey JARVIS\" whenever you need me." to "Orb Standby"
+        }
+    }
+
+    private suspend fun handleAppInstallDiscovery(appQuery: String): Pair<String, String> {
+        _autonomousStepStatus.value = "Searching Google Play for $appQuery..."
+        val discovery = appDiscoveryEngine.discoverApp(appQuery)
+        _autonomousStepStatus.value = ""
+        val first = discovery.candidates.firstOrNull()
+        if (first != null && !first.packageId.isNullOrBlank()) {
+            val openRes = appDiscoveryEngine.openInstallCandidate(context, first)
+            localRepo.logAiActivity("APP_DISCOVERY", "Opened Play Store for ${first.title} (${first.packageId})")
+            return "${discovery.statusMessage} ${openRes.replyText}".trim() to "Play Store"
+        }
+        return discovery.statusMessage to "App Discovery"
+    }
+
+    private fun handleReadNotifications(prompt: String): Pair<String, String> {
+        if (!NotificationVaultBridge.isAccessGranted(context)) {
+            runCatching { context.startActivity(NotificationVaultBridge.openAccessSettingsIntent()) }
+            return "To read your notifications and missed calls, enable JARVIS Notification Access in the settings screen I just opened, Sir." to "Notification Access"
+        }
+        val summary = NotificationVaultBridge.buildSummary(prompt.lowercase(Locale.US))
+        return summary to "Notifications"
+    }
+
+    private fun JarvisLocalRepository.logAiActivitySyncSafe(type: String, detail: String) {
+        scope.launch { logAiActivity(type, detail) }
     }
 
     private suspend fun verifyOwnerLockIfNeeded(
@@ -406,6 +663,7 @@ class JarvisCommandCoordinator(
         if (voiceEngine.isOwnerRecentlyVerified()) {
             return true
         }
+        updateTaskProgress(TaskStage.PERMISSION_CHECK, "Voice ID Check", "Verifying owner voice for $actionDescription")
         _autonomousStepStatus.value = "Verifying Sir's voiceprint for $actionDescription..."
         voiceEngine.speak("Quick voice check for $actionDescription, Sir — speak briefly now.", followUpListen = false)
         delay(1700L)
@@ -435,6 +693,7 @@ class JarvisCommandCoordinator(
             return "Owner voiceprint didn't verify, Sir, so I paused messaging under your security lock." to "Voice Lock"
         }
 
+        updateTaskProgress(TaskStage.EXECUTING, "Messaging ($platform)", "Finding $contact")
         _autonomousStepStatus.value = "Opening $platform & finding $contact..."
         deviceLearningEngine.recordCommandHabit(contact, SystemIntentKind.TEXT_CONTACT)
 
@@ -446,7 +705,6 @@ class JarvisCommandCoordinator(
         deviceLearningEngine.recordAppInteraction(platform)
         delay(1450L)
 
-        // Attempt search inside the opened messaging app
         val firstSearch = svc.findAndTapSearchAndType(contact)
         if (!firstSearch.success) {
             delay(750L)
@@ -486,7 +744,6 @@ class JarvisCommandCoordinator(
             return stageMessageAndAskSendConfirmation(svc, platform, chosen.displayName, messageText)
         }
 
-        // If already inside a chat or no separate row matched, see if a compose box is already open
         val screenText = svc.readScreenSummary().lowercase(Locale.US)
         return if (screenText.contains("input fields:") && (screenText.contains("message") || screenText.contains("chat"))) {
             stageMessageAndAskSendConfirmation(svc, platform, contact, messageText)
@@ -577,7 +834,6 @@ class JarvisCommandCoordinator(
                     delay(950L)
                     stageMessageAndAskSendConfirmation(svc, session.platform, chosen.displayName, session.draftMessage)
                 } else {
-                    // Not a choice answer — clear pending session and handle as a normal command
                     pendingMessageSession = null
                     _pendingConfirmationSummary.value = null
                     null
@@ -597,7 +853,6 @@ class JarvisCommandCoordinator(
                     "yes", "yeah", "yep", "confirm", "send", "send it", "go ahead", "do it", "yes send it", "yes sir"
                 ) || lower.startsWith("yes ") || lower.contains("send it")
                 if (!isConfirm) {
-                    // User issued another command instead
                     pendingMessageSession = null
                     _pendingConfirmationSummary.value = null
                     return null
@@ -661,9 +916,6 @@ class JarvisCommandCoordinator(
         return result.message to "Social Control"
     }
 
-    /**
-     * Autonomous multi-step UI Screen Agent for unfamiliar requests inside apps or websites.
-     */
     private suspend fun runAutonomousUiTask(goal: String, settings: JarvisUserSettings): String {
         val svc = JarvisAccessibilityService.activeInstance()
             ?: return "Turn on JARVIS Screen Helper first, Sir, so I can inspect the screen and complete that task automatically."
@@ -677,6 +929,7 @@ class JarvisCommandCoordinator(
                 return "Paused autonomous steps at your command, Sir."
             }
 
+            updateTaskProgress(TaskStage.EXECUTING, "Autonomous Agent", "Studying screen (step $step/6)", step, 6)
             _autonomousStepStatus.value = "Autonomous step $step/6: studying screen..."
             val (screenMap, _) = svc.readRichScreenMap(maxNodes = 36)
             lastPkg = svc.activeForegroundPackage().orEmpty()
@@ -749,7 +1002,7 @@ class JarvisCommandCoordinator(
             isVoice = fromVoice,
             toolSummary = toolLabel
         )
-        if (currentSettings.voiceOutputEnabled) {
+        if (currentSettings.voiceOutputEnabled && !voiceEngine.isMuted.value) {
             voiceEngine.speak(reply, followUpListen = fromVoice)
         }
     }
@@ -767,6 +1020,13 @@ class JarvisCommandCoordinator(
 
         for ((index, parsed) in commands.withIndex()) {
             if (abortRequested) break
+            updateTaskProgress(
+                stage = TaskStage.EXECUTING,
+                title = parsed.kind.name.replace('_', ' '),
+                detail = parsed.primaryArg.ifBlank { prompt.take(36) },
+                stepIndex = index + 1,
+                totalSteps = commands.size
+            )
             val hasMoreSteps = index < commands.lastIndex
             val stepResult: Pair<String, String>? = when (parsed.kind) {
                 SystemIntentKind.SWITCH_ACTIVITY_ASSISTANT -> {
@@ -781,18 +1041,32 @@ class JarvisCommandCoordinator(
                     _navigationEvents.tryEmit(parsed.primaryArg)
                     "Opening ${parsed.primaryArg.replaceFirstChar { it.uppercase() }}, Sir." to "Navigation"
                 }
+                SystemIntentKind.SWITCH_TO_MINI_ORB -> handleSwitchToMiniOrb()
+                SystemIntentKind.OPEN_FULL_APP -> handleOpenFullApp()
+                SystemIntentKind.ORB_CONTROL -> handleOrbControl(parsed.primaryArg)
+                SystemIntentKind.MUTE_MIC -> {
+                    val mute = parsed.primaryArg == "mute"
+                    voiceEngine.setMuted(mute)
+                    (if (mute) "Microphone muted, Sir. Tap Unmute whenever you're ready." else "Microphone unmuted — listening again, Sir.") to "Mic Control"
+                }
                 SystemIntentKind.FLOATING_ORB -> {
-                    manualOrbPinned = parsed.primaryArg != "close"
-                    val exec = JarvisSystemAssistant.execute(context, parsed)
-                    localRepo.logAiActivity("FLOATING_ORB", exec.replyText)
-                    exec.replyText to exec.actionLabel
+                    if (parsed.primaryArg == "close") {
+                        handleOrbControl("sleep")
+                    } else {
+                        handleSwitchToMiniOrb()
+                    }
                 }
-                SystemIntentKind.TEXT_CONTACT -> {
-                    executeCrossPlatformTextFlow(parsed, currentSettings, fromVoice)
+                SystemIntentKind.INSTALL_APP -> handleAppInstallDiscovery(parsed.primaryArg)
+                SystemIntentKind.READ_NOTIFICATIONS -> handleReadNotifications(prompt)
+                SystemIntentKind.NEWS_RESEARCH -> {
+                    _isProcessing.value = true
+                    val briefing = newsEngine.fetchBriefing(parsed.primaryArg)
+                    _isProcessing.value = false
+                    localRepo.logAiActivity("NEWS_RESEARCH", "Fetched ${briefing.topic}")
+                    briefing.headlinesSummary to "Live Briefing"
                 }
-                SystemIntentKind.SOCIAL_ACTION -> {
-                    executeSocialNavigationFlow(parsed)
-                }
+                SystemIntentKind.TEXT_CONTACT -> executeCrossPlatformTextFlow(parsed, currentSettings, fromVoice)
+                SystemIntentKind.SOCIAL_ACTION -> executeSocialNavigationFlow(parsed)
                 SystemIntentKind.STUDY_DEVICE -> {
                     _autonomousStepStatus.value = "Studying installed apps & patterns..."
                     val report = deviceLearningEngine.studyDeviceNow(force = true)

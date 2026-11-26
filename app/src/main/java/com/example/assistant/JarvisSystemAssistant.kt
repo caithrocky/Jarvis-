@@ -65,7 +65,15 @@ enum class SystemIntentKind {
     SEARCH_IN_APP,
     VERIFY_VOICE,
     DAILY_BRIEFING,
-    AUTONOMOUS_TASK
+    AUTONOMOUS_TASK,
+    SWITCH_TO_MINI_ORB,
+    OPEN_FULL_APP,
+    ORB_CONTROL,
+    MUTE_MIC,
+    INSTALL_APP,
+    READ_NOTIFICATIONS,
+    MEDIA_PLAY_SEARCH,
+    NEWS_RESEARCH
 }
 
 data class ParsedSystemCommand(
@@ -371,23 +379,66 @@ object JarvisSystemAssistant {
             return ParsedSystemCommand(SystemIntentKind.ENABLE_ALL_MODES)
         }
 
-        // 2. Floating Mini Orb commands
+        // 2. Mode Switching (Full App <-> Mini Orb) & Orb Lifecycle Commands
         if (
-            lower.contains("close floating orb") ||
-            lower.contains("hide floating orb") ||
-            lower.contains("turn off floating orb") ||
-            lower.contains("close mini orb")
+            lower.contains("close the orb") || lower.contains("close orb") ||
+            lower.contains("go to sleep") || lower.contains("close floating orb") ||
+            lower.contains("hide floating orb") || lower.contains("turn off floating orb") ||
+            lower.contains("close mini orb") || lower.contains("dismiss orb")
         ) {
-            return ParsedSystemCommand(SystemIntentKind.FLOATING_ORB, "close")
+            return ParsedSystemCommand(SystemIntentKind.ORB_CONTROL, "sleep")
         }
+        if (lower == "stay here" || lower == "keep listening" || lower == "stay awake" || lower == "stay open") {
+            return ParsedSystemCommand(SystemIntentKind.ORB_CONTROL, "stay_here")
+        }
+        if (AssistantModePolicy.isOpenFullAppPhrase(lower)) {
+            return ParsedSystemCommand(SystemIntentKind.OPEN_FULL_APP)
+        }
+        if (AssistantModePolicy.isSwitchToMiniOrbPhrase(lower) || lower.contains("floating orb") || lower.contains("mini orb")) {
+            return ParsedSystemCommand(SystemIntentKind.SWITCH_TO_MINI_ORB)
+        }
+
+        // Mute / Unmute microphone
+        if (lower == "mute" || lower == "mute mic" || lower == "mute microphone" || lower == "mute yourself") {
+            return ParsedSystemCommand(SystemIntentKind.MUTE_MIC, "mute")
+        }
+        if (lower == "unmute" || lower == "unmute mic" || lower == "unmute microphone" || lower == "listen again") {
+            return ParsedSystemCommand(SystemIntentKind.MUTE_MIC, "unmute")
+        }
+
+        // Notifications / Missed calls / "Who texted me?"
         if (
-            lower.contains("open floating orb") ||
-            lower.contains("show floating orb") ||
-            lower.contains("floating orb") ||
-            lower.contains("mini orb") ||
-            lower.contains("minimize to orb")
+            lower.contains("read my notifications") || lower.contains("check notifications") ||
+            lower.contains("check my notifications") ||
+            lower.contains("any notifications") || lower.contains("what notifications") ||
+            lower.contains("missed call") || lower.contains("who texted me") ||
+            lower.contains("who messaged me") || lower.contains("unread messages")
         ) {
-            return ParsedSystemCommand(SystemIntentKind.FLOATING_ORB, "open")
+            return ParsedSystemCommand(SystemIntentKind.READ_NOTIFICATIONS, trimmed)
+        }
+
+        // App Discovery & Install: "download Spotify", "install TradingView", "find ... on Play Store"
+        val installMatch = Regex(
+            "^(?:please\\s+)?(?:download|install|get)\\s+(?:the\\s+)?(.+?)(?:\\s+app|\\s+on\\s+play\\s+store|\\s+from\\s+play\\s+store)?$",
+            RegexOption.IGNORE_CASE
+        ).find(trimmed)
+        if (installMatch != null && !lower.contains("update")) {
+            val targetApp = installMatch.groupValues[1].trim()
+            if (targetApp.isNotBlank()) {
+                return ParsedSystemCommand(SystemIntentKind.INSTALL_APP, targetApp)
+            }
+        }
+
+        // Kenyan & Global News / Weather / Traffic / Market Research
+        if (
+            lower.contains("kenyan news") || lower.contains("kenya news") || lower.contains("news in kenya") ||
+            lower.contains("daily nation") || lower.contains("citizen tv") || lower.contains("citizen digital") ||
+            lower.contains("latest news") || lower.contains("world news") || lower.contains("tech news") ||
+            lower.contains("business news") || lower.contains("sports news") ||
+            lower.contains("weather today") || lower.contains("weather in ") || lower.contains("what's the weather") ||
+            lower.contains("traffic update") || lower.contains("traffic in ")
+        ) {
+            return ParsedSystemCommand(SystemIntentKind.NEWS_RESEARCH, trimmed)
         }
 
         // 3. Step-by-step screen guidance & reading
@@ -616,21 +667,41 @@ object JarvisSystemAssistant {
         }
 
         // 9. Camera / Media / Alarm / Timer / Calendar / Call / SMS / Email
-        if (lower == "take a photo" || lower == "take a picture" || lower == "open camera" || lower == "launch camera") {
-            return ParsedSystemCommand(SystemIntentKind.OPEN_CAMERA)
+        if (lower.contains("selfie") || lower.contains("front camera")) {
+            return ParsedSystemCommand(SystemIntentKind.OPEN_CAMERA, "selfie")
         }
-        if (lower == "record a video" || lower == "open video camera") {
+        if (lower == "take a photo" || lower == "take a picture" || lower == "open camera" || lower == "launch camera") {
+            return ParsedSystemCommand(SystemIntentKind.OPEN_CAMERA, "rear")
+        }
+        if (lower == "record a video" || lower == "open video camera" || lower == "take a video") {
             return ParsedSystemCommand(SystemIntentKind.OPEN_VIDEO_CAMERA)
         }
         when {
-            lower == "play music" || lower == "pause music" || lower == "play pause" || lower == "resume music" ->
-                return ParsedSystemCommand(SystemIntentKind.MEDIA_CONTROL, "play_pause")
-            lower == "next song" || lower == "next track" || lower == "skip track" ->
+            lower == "play music" || lower == "pause music" || lower == "play pause" || lower == "resume music" || lower == "pause media" ->
+                return ParsedSystemCommand(SystemIntentKind.MEDIA_CONTROL, if (lower.contains("pause")) "pause" else "play_pause")
+            lower == "next song" || lower == "next track" || lower == "skip track" || lower == "skip song" ->
                 return ParsedSystemCommand(SystemIntentKind.MEDIA_CONTROL, "next")
             lower == "previous song" || lower == "previous track" ->
                 return ParsedSystemCommand(SystemIntentKind.MEDIA_CONTROL, "previous")
             lower == "stop music" || lower == "stop media" ->
                 return ParsedSystemCommand(SystemIntentKind.MEDIA_CONTROL, "stop")
+            lower == "volume up" || lower == "turn up the volume" || lower == "louder" ->
+                return ParsedSystemCommand(SystemIntentKind.MEDIA_CONTROL, "volume_up")
+            lower == "volume down" || lower == "turn down the volume" || lower == "quieter" ->
+                return ParsedSystemCommand(SystemIntentKind.MEDIA_CONTROL, "volume_down")
+            lower == "mute volume" || lower == "mute media" ->
+                return ParsedSystemCommand(SystemIntentKind.MEDIA_CONTROL, "mute_media")
+        }
+        val playMediaMatch = Regex(
+            "^(?:please\\s+)?play\\s+(.+?)(?:\\s+on\\s+(spotify|youtube|netflix))?$",
+            RegexOption.IGNORE_CASE
+        ).find(trimmed)
+        if (playMediaMatch != null) {
+            val mediaQuery = playMediaMatch.groupValues[1].trim()
+            val mediaApp = playMediaMatch.groupValues[2].trim()
+            if (mediaQuery.isNotBlank() && mediaQuery.lowercase(Locale.US) !in setOf("music", "song", "media", "video")) {
+                return ParsedSystemCommand(SystemIntentKind.MEDIA_PLAY_SEARCH, mediaQuery, mediaApp)
+            }
         }
 
         val alarmMatch = Regex("(?:set\\s+(?:an\\s+)?alarm\\s+(?:for|at)|wake\\s+me\\s+up\\s+at)\\s+(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)?(?:\\s+(?:called|labeled|for)\\s+(.+))?").find(lower)
@@ -866,12 +937,13 @@ object JarvisSystemAssistant {
         }.orEmpty()
 
         val canonicalPlatform = when (detectedPlatform) {
-            "insta", "ig" -> "Instagram"
-            "tik tok" -> "TikTok"
-            "yt" -> "YouTube"
-            "snap" -> "Snapchat"
-            "fb" -> "Facebook"
+            "insta", "ig", "instagram" -> "Instagram"
+            "tiktok", "tik tok" -> "TikTok"
+            "youtube", "yt" -> "YouTube"
+            "snap", "snapchat" -> "Snapchat"
+            "fb", "facebook" -> "Facebook"
             "twitter" -> "X"
+            "linkedin" -> "LinkedIn"
             else -> detectedPlatform.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() }
         }
 
@@ -887,10 +959,12 @@ object JarvisSystemAssistant {
             Regex("^(?:please\\s+)?(?:previous\\s+(?:post|video|reel)|scroll\\s+up)$", RegexOption.IGNORE_CASE).matches(lower) -> "scroll_up"
             Regex("^(?:please\\s+)?(?:open\\s+(?:my\\s+)?(?:dms|direct\\s+messages|inbox))(?:\\s+(?:on|in)\\s+.+)?$", RegexOption.IGNORE_CASE).matches(lower) -> "dms"
             Regex("^(?:please\\s+)?open\\s+(?:my\\s+)?profile(?:\\s+(?:on|in)\\s+.+)?$", RegexOption.IGNORE_CASE).matches(lower) -> "profile"
+            Regex("^(?:please\\s+)?(?:open|show|watch)\\s+(?:instagram\\s+)?reels$", RegexOption.IGNORE_CASE).matches(lower) -> "reels"
             else -> null
         } ?: return null
 
-        return ParsedSystemCommand(SystemIntentKind.SOCIAL_ACTION, action, canonicalPlatform)
+        val effectivePlatform = if (action == "reels" && canonicalPlatform.isBlank()) "Instagram" else canonicalPlatform
+        return ParsedSystemCommand(SystemIntentKind.SOCIAL_ACTION, action, effectivePlatform)
     }
 
     fun extractAndStripAiActions(rawReply: String): Pair<String, List<ParsedSystemCommand>> {
@@ -989,7 +1063,15 @@ object JarvisSystemAssistant {
                     commands.add(ParsedSystemCommand(SystemIntentKind.PLATFORM_SEARCH, "youtube", it))
                 }
                 "OPEN_SETTINGS" -> commands.add(ParsedSystemCommand(SystemIntentKind.OPEN_SETTINGS, parts.firstOrNull().orEmpty()))
-                "CAMERA" -> commands.add(ParsedSystemCommand(SystemIntentKind.OPEN_CAMERA))
+                "CAMERA" -> commands.add(
+                    ParsedSystemCommand(SystemIntentKind.OPEN_CAMERA, parts.firstOrNull()?.ifBlank { "rear" } ?: "rear")
+                )
+                "MEDIA_CONTROL" -> commands.add(
+                    ParsedSystemCommand(SystemIntentKind.MEDIA_CONTROL, parts.firstOrNull()?.ifBlank { "play_pause" } ?: "play_pause")
+                )
+                "MEDIA_PLAY" -> parts.firstOrNull()?.takeIf { it.isNotBlank() }?.let { query ->
+                    commands.add(ParsedSystemCommand(SystemIntentKind.MEDIA_PLAY_SEARCH, query, parts.getOrElse(1) { "" }))
+                }
                 "TEXT_CONTACT" -> {
                     val platform = parts.getOrNull(0)?.takeIf { it.isNotBlank() } ?: "WhatsApp"
                     val contact = parts.getOrNull(1)?.takeIf { it.isNotBlank() } ?: ""
@@ -1013,6 +1095,22 @@ object JarvisSystemAssistant {
                 "VERIFY_VOICE" -> commands.add(ParsedSystemCommand(SystemIntentKind.VERIFY_VOICE))
                 "AUTONOMOUS_TASK" -> parts.firstOrNull()?.takeIf { it.isNotBlank() }?.let { goal ->
                     commands.add(ParsedSystemCommand(SystemIntentKind.AUTONOMOUS_TASK, goal))
+                }
+                "MINI_ORB", "SWITCH_TO_MINI_ORB" -> {
+                    val modeArg = parts.firstOrNull()?.lowercase(Locale.US).orEmpty()
+                    if (modeArg == "close" || modeArg == "sleep") {
+                        commands.add(ParsedSystemCommand(SystemIntentKind.ORB_CONTROL, "sleep"))
+                    } else {
+                        commands.add(ParsedSystemCommand(SystemIntentKind.SWITCH_TO_MINI_ORB))
+                    }
+                }
+                "OPEN_FULL_APP", "FULL_APP" -> commands.add(ParsedSystemCommand(SystemIntentKind.OPEN_FULL_APP))
+                "INSTALL_APP" -> parts.firstOrNull()?.takeIf { it.isNotBlank() }?.let { app ->
+                    commands.add(ParsedSystemCommand(SystemIntentKind.INSTALL_APP, app))
+                }
+                "READ_NOTIFICATIONS" -> commands.add(ParsedSystemCommand(SystemIntentKind.READ_NOTIFICATIONS))
+                "NEWS_RESEARCH" -> parts.firstOrNull()?.takeIf { it.isNotBlank() }?.let { topic ->
+                    commands.add(ParsedSystemCommand(SystemIntentKind.NEWS_RESEARCH, topic))
                 }
             }
         }
@@ -1215,21 +1313,10 @@ object JarvisSystemAssistant {
                 context,
                 "https://www.youtube.com/results?search_query=${Uri.encode(command.primaryArg)}"
             )
-            SystemIntentKind.OPEN_CAMERA -> launchIntent(
-                context = context,
-                intent = Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA),
-                successReply = "Opening the camera now, Sir.",
-                failureReply = "No camera app responded on this device, Sir.",
-                actionLabel = "System Camera"
-            )
-            SystemIntentKind.OPEN_VIDEO_CAMERA -> launchIntent(
-                context = context,
-                intent = Intent(MediaStore.INTENT_ACTION_VIDEO_CAMERA),
-                successReply = "Opening the video camera now, Sir.",
-                failureReply = "No video camera app responded on this device, Sir.",
-                actionLabel = "Video Camera"
-            )
-            SystemIntentKind.MEDIA_CONTROL -> handleMediaControl(context, command.primaryArg)
+            SystemIntentKind.OPEN_CAMERA -> MediaAndCameraController.launchCamera(context, command.primaryArg.ifBlank { "rear" })
+            SystemIntentKind.OPEN_VIDEO_CAMERA -> MediaAndCameraController.launchCamera(context, "video")
+            SystemIntentKind.MEDIA_CONTROL -> MediaAndCameraController.controlPlayback(context, command.primaryArg)
+            SystemIntentKind.MEDIA_PLAY_SEARCH -> MediaAndCameraController.playMediaSearch(context, command.primaryArg, command.secondaryArg)
             SystemIntentKind.OPEN_SETTINGS -> openSystemSettings(context, command.primaryArg)
             SystemIntentKind.TYPE_TEXT -> {
                 val svc = JarvisAccessibilityService.activeInstance()
@@ -1604,26 +1691,6 @@ object JarvisSystemAssistant {
             actionLabel = "App Lookup",
             launchedTarget = false
         )
-    }
-
-    private fun handleMediaControl(context: Context, action: String): SystemExecutionResult {
-        val audio = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-            ?: return SystemExecutionResult(true, "Audio service is unavailable, Sir.", "Media Control")
-        val keyCode = when (action) {
-            "next" -> KeyEvent.KEYCODE_MEDIA_NEXT
-            "previous" -> KeyEvent.KEYCODE_MEDIA_PREVIOUS
-            "stop" -> KeyEvent.KEYCODE_MEDIA_STOP
-            else -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
-        }
-        audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
-        audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
-        val label = when (action) {
-            "next" -> "Skipping to the next track, Sir."
-            "previous" -> "Returning to the previous track, Sir."
-            "stop" -> "Stopping media playback, Sir."
-            else -> "Toggling media playback, Sir."
-        }
-        return SystemExecutionResult(true, label, "Media Control", launchedTarget = true)
     }
 
     private fun openSystemSettings(context: Context, target: String): SystemExecutionResult {

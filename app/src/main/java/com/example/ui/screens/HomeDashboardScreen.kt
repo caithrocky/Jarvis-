@@ -1,71 +1,63 @@
 package com.example.ui.screens
 
-import androidx.compose.foundation.Image
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Chat
-import androidx.compose.material.icons.filled.AccessibilityNew
-import androidx.compose.material.icons.filled.BluetoothAudio
-import androidx.compose.material.icons.filled.BubbleChart
-import androidx.compose.material.icons.filled.GraphicEq
-import androidx.compose.material.icons.filled.Language
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.MicOff
-import androidx.compose.material.icons.filled.OpenInBrowser
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.example.R
+import androidx.compose.ui.unit.sp
 import com.example.data.local.JarvisUserSettings
+import com.example.domain.model.OrbState
+import com.example.domain.model.TaskStage
 import com.example.ui.JarvisSection
 import com.example.ui.JarvisUiState
-import com.example.ui.components.HudGlassCard
 import com.example.ui.components.JarvisOrb
-import com.example.ui.components.StatusBadge
 import com.example.ui.theme.ArcCyan
-import com.example.ui.theme.ElectricBlue
-import com.example.ui.theme.LocalJarvisColors
-import com.example.ui.theme.ProfitEmerald
+import com.example.ui.theme.SoftTurquoise
+import com.example.ui.theme.SoftViolet
 import com.example.ui.theme.WarningAmber
-import java.util.Calendar
 
 @Composable
 fun HomeDashboardScreen(
@@ -73,515 +65,393 @@ fun HomeDashboardScreen(
     settings: JarvisUserSettings,
     hasMicPermission: Boolean,
     onRequestMicPermission: () -> Unit,
-    onRequestOverlayPermission: () -> Unit,
-    onOpenAccessibilitySettings: () -> Unit,
+    onOpenMenu: () -> Unit,
     onOrbTap: () -> Unit,
-    onToggleAlwaysOn: (Boolean) -> Unit,
-    onToggleFloatingOrb: (Boolean) -> Unit,
-    onLaunchFloatingOrbNow: () -> Unit,
-    onQuickVoicePrompt: (String) -> Unit,
-    onOpenWebsite: (String) -> Unit,
     onNavigate: (JarvisSection) -> Unit,
     onAbortAutonomous: () -> Unit
 ) {
-    val jc = LocalJarvisColors.current
-    var showScreenHelperDisclosure by remember { mutableStateOf(false) }
-    var websiteInput by remember { mutableStateOf("") }
-
-    val greeting = remember {
-        when (Calendar.getInstance().get(Calendar.HOUR_OF_DAY)) {
-            in 5..11 -> "Good morning, Sir"
-            in 12..16 -> "Good afternoon, Sir"
-            else -> "Good evening, Sir"
-        }
+    val triggerVoice = {
+        if (!hasMicPermission) onRequestMicPermission() else onOrbTap()
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        Image(
-            painter = painterResource(id = R.drawable.img_jarvis_hud_bg),
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    colorStops = arrayOf(
+                        0.0f to Color(0xFF010207),
+                        0.52f to Color(0xFF020714),
+                        0.76f to Color(0xFF05183D),
+                        0.91f to Color(0xFF0A398C),
+                        1.0f to Color(0xFF1456C4)
+                    )
+                )
+            )
+    ) {
+        // Subtle radial cobalt glow rising from behind the bottom voice pill
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        Color(0xFF287EFF).copy(alpha = 0.42f),
+                        Color(0xFF0D44AA).copy(alpha = 0.20f),
+                        Color.Transparent
+                    ),
+                    center = Offset(size.width / 2f, size.height * 0.96f),
+                    radius = size.width * 0.85f
+                ),
+                radius = size.width * 0.85f,
+                center = Offset(size.width / 2f, size.height * 0.96f)
+            )
+        }
+
+        Column(
             modifier = Modifier
                 .fillMaxSize()
-                .alpha(0.16f)
-        )
-
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Greeting Header
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+            // Top bar: Hamburger button (all other features) on left, Settings button on right
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                GlowingGlassCircleButton(
+                    onClick = onOpenMenu,
+                    contentDescription = "Open all JARVIS features",
+                    modifier = Modifier.testTag("home_menu_button")
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = greeting,
-                            style = MaterialTheme.typography.headlineMedium,
-                            color = jc.electricBlue
-                        )
-                        Text(
-                            text = "Private AI assistant, Chrome browser & screen plugin",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = jc.mutedSlate
-                        )
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (uiState.bluetoothAudioReady) {
-                            Icon(
-                                imageVector = Icons.Filled.BluetoothAudio,
-                                contentDescription = "Bluetooth audio ready",
-                                tint = ArcCyan,
-                                modifier = Modifier.padding(end = 6.dp)
-                            )
-                        }
-                        IconButton(
-                            onClick = { onNavigate(JarvisSection.SETTINGS) },
-                            modifier = Modifier.testTag("home_settings_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Settings,
-                                contentDescription = "Open settings",
-                                tint = ElectricBlue
-                            )
-                        }
-                    }
+                    Icon(
+                        imageVector = Icons.Filled.Menu,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+
+                GlowingGlassCircleButton(
+                    onClick = { onNavigate(JarvisSection.SETTINGS) },
+                    contentDescription = "Open settings",
+                    modifier = Modifier.testTag("home_settings_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Settings,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
             }
 
-            // Futuristic Holographic Telemetry Strip
-            if (settings.futuristicHudMode) {
-                item {
-                    HudGlassCard(borderColor = ArcCyan.copy(alpha = 0.36f)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+            // Centered Orb + Greeting + Headline
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                    modifier = Modifier.widthIn(max = 520.dp)
+                ) {
+                    JarvisOrb(
+                        state = uiState.orbState,
+                        audioLevel = uiState.audioLevel,
+                        onClick = triggerVoice,
+                        size = 212.dp,
+                        executionProgress = uiState.taskProgress.fraction,
+                        showStateLabel = false
+                    )
+
+                    Spacer(modifier = Modifier.height(22.dp))
+
+                    Text(
+                        text = when {
+                            uiState.isMicMuted -> "Hello sir • Mic muted"
+                            uiState.orbState == OrbState.LISTENING -> "Listening..."
+                            uiState.orbState == OrbState.UNDERSTANDING ||
+                                uiState.orbState == OrbState.PROCESSING -> "Thinking..."
+                            uiState.orbState == OrbState.SPEAKING -> "Speaking..."
+                            uiState.orbState == OrbState.EXECUTING -> "On it, sir..."
+                            settings.wakeWordEnabled && hasMicPermission -> "Always listening • Hello sir"
+                            else -> "Hello sir"
+                        },
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Normal,
+                            letterSpacing = 0.3.sp
+                        ),
+                        color = when {
+                            uiState.isMicMuted -> WarningAmber
+                            uiState.orbState == OrbState.LISTENING -> ArcCyan
+                            else -> Color(0xFFB4C4DC)
+                        },
+                        textAlign = TextAlign.Center
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Text(
+                        text = "How can I help\nyou today?",
+                        style = MaterialTheme.typography.headlineLarge.copy(
+                            fontSize = 31.sp,
+                            lineHeight = 38.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            letterSpacing = (-0.4).sp
+                        ),
+                        color = Color.White,
+                        textAlign = TextAlign.Center
+                    )
+
+                    // Subtle live status strip ONLY when voice/task/reply is actively happening
+                    val showLiveCard = uiState.partialVoiceText.isNotBlank() ||
+                        uiState.streamingReply.isNotBlank() ||
+                        uiState.taskProgress.stage != TaskStage.IDLE ||
+                        uiState.autonomousStepStatus.isNotBlank() ||
+                        uiState.pendingConfirmationSummary != null
+
+                    AnimatedVisibility(
+                        visible = showLiveCard,
+                        enter = fadeIn(),
+                        exit = fadeOut()
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .padding(top = 18.dp)
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(Color(0x52081B3E))
+                                .border(
+                                    width = 1.dp,
+                                    color = Color(0x456EC1FF),
+                                    shape = RoundedCornerShape(20.dp)
+                                )
+                                .clickable { onNavigate(JarvisSection.JARVIS) }
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "SYSTEM HUD • UNDER YOUR COMMAND",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = ArcCyan
-                                )
-                                Spacer(Modifier.height(2.dp))
-                                Text(
-                                    text = "${uiState.learnedAppsCount} apps learned • ${uiState.learnedWorkflowsCount} workflows • ${if (uiState.voiceEnrolled) "Voice ID Locked" else "Voice ID Open"}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = jc.mutedSlate
-                                )
-                                if (uiState.autonomousStepStatus.isNotBlank()) {
-                                    Spacer(Modifier.height(4.dp))
+                            when {
+                                uiState.pendingConfirmationSummary != null -> {
                                     Text(
-                                        text = uiState.autonomousStepStatus,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = ProfitEmerald
+                                        text = "Confirm: ${uiState.pendingConfirmationSummary}",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = Color.White,
+                                        textAlign = TextAlign.Center,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
-                            }
-                            if (uiState.autonomousStepStatus.isNotBlank() || uiState.pendingConfirmationSummary != null) {
-                                OutlinedButton(
-                                    onClick = onAbortAutonomous,
-                                    modifier = Modifier.testTag("home_abort_autonomous_btn")
-                                ) {
-                                    Text("Abort")
+                                uiState.partialVoiceText.isNotBlank() -> {
+                                    Text(
+                                        text = "\"${uiState.partialVoiceText}\"",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = ArcCyan,
+                                        textAlign = TextAlign.Center,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                 }
-                            } else {
-                                StatusBadge(
-                                    text = if (settings.showTapIndicator || settings.showHighlightIndicator) "HUD ON" else "QUIET",
-                                    color = if (settings.showTapIndicator || settings.showHighlightIndicator) ProfitEmerald else ElectricBlue
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Interactive Central Orb Hero Card
-            item {
-                HudGlassCard(borderColor = ElectricBlue.copy(alpha = 0.42f)) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        JarvisOrb(
-                            state = uiState.orbState,
-                            audioLevel = uiState.audioLevel,
-                            onClick = {
-                                if (!hasMicPermission) onRequestMicPermission() else onOrbTap()
-                            },
-                            size = 182.dp
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Text(
-                            text = if (uiState.partialVoiceText.isNotBlank()) {
-                                "\"${uiState.partialVoiceText}\""
-                            } else {
-                                uiState.voiceStatusDetail
-                            },
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = ArcCyan
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Button(
-                                onClick = {
-                                    if (!hasMicPermission) onRequestMicPermission() else onOrbTap()
-                                },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("home_talk_button"),
-                                colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue)
-                            ) {
-                                Icon(Icons.Filled.Mic, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text("Talk")
-                            }
-                            OutlinedButton(
-                                onClick = { onNavigate(JarvisSection.JARVIS) },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("home_chat_button")
-                            ) {
-                                Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text("Chat")
-                            }
-                            OutlinedButton(
-                                onClick = {
-                                    if (!uiState.hasOverlayPermission) {
-                                        onRequestOverlayPermission()
-                                    } else {
-                                        onLaunchFloatingOrbNow()
+                                uiState.streamingReply.isNotBlank() -> {
+                                    Text(
+                                        text = uiState.streamingReply,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = Color(0xFFEAF6FF),
+                                        textAlign = TextAlign.Center,
+                                        maxLines = 3,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                uiState.autonomousStepStatus.isNotBlank() || uiState.taskProgress.isBusy -> {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = uiState.autonomousStepStatus.ifBlank {
+                                                uiState.taskProgress.detail.ifBlank { uiState.taskProgress.title }
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = SoftTurquoise,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        OutlinedButton(
+                                            onClick = onAbortAutonomous,
+                                            modifier = Modifier.testTag("home_abort_autonomous_btn")
+                                        ) {
+                                            Text("Abort")
+                                        }
                                     }
-                                },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("home_mini_orb_button")
-                            ) {
-                                Icon(Icons.Filled.BubbleChart, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text("Mini Orb")
-                            }
-                        }
-
-                        if (!hasMicPermission) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Button(
-                                onClick = onRequestMicPermission,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("grant_mic_button"),
-                                colors = ButtonDefaults.buttonColors(containerColor = ArcCyan.copy(alpha = 0.85f))
-                            ) {
-                                Icon(Icons.Filled.GraphicEq, contentDescription = null)
-                                Spacer(Modifier.width(8.dp))
-                                Text("Allow Microphone So JARVIS Can Hear You")
+                                    if (uiState.taskProgress.isBusy) {
+                                        Spacer(modifier = Modifier.height(6.dp))
+                                        LinearProgressIndicator(
+                                            progress = { uiState.taskProgress.fraction.coerceIn(0.08f, 1f) },
+                                            modifier = Modifier.fillMaxWidth(),
+                                            color = SoftTurquoise
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            }
 
-            // Open Any Website in Chrome
-            item {
-                HudGlassCard(borderColor = ArcCyan.copy(alpha = 0.30f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Filled.Language,
-                            contentDescription = null,
-                            tint = ArcCyan,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text("Open Website in Chrome", style = MaterialTheme.typography.titleMedium, color = ArcCyan)
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = "Enter any link or site name — if JARVIS cannot find it online, he will ask you for the link.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = jc.mutedSlate
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = websiteInput,
-                            onValueChange = { websiteInput = it },
-                            placeholder = { Text("e.g. tradingview.com or site name") },
-                            singleLine = true,
+                    if (!hasMicPermission) {
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text(
+                            text = "Tap the orb or voice button to allow microphone access",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = SoftViolet.copy(alpha = 0.9f),
+                            textAlign = TextAlign.Center,
                             modifier = Modifier
-                                .weight(1f)
-                                .testTag("home_website_input")
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { onRequestMicPermission() }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                                .testTag("grant_mic_button")
                         )
-                        Button(
-                            onClick = {
-                                if (websiteInput.isNotBlank()) {
-                                    onOpenWebsite(websiteInput)
-                                    websiteInput = ""
-                                }
-                            },
-                            enabled = websiteInput.isNotBlank(),
-                            modifier = Modifier.testTag("home_open_website_button")
-                        ) {
-                            Icon(Icons.Filled.OpenInBrowser, contentDescription = "Open website in Chrome")
-                            Spacer(Modifier.width(4.dp))
-                            Text("Open")
-                        }
                     }
                 }
             }
 
-            // Quick Things You Can Ask
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(
-                        text = "Try asking JARVIS",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = ArcCyan
+            // Bottom Glowing Oral Voice Pill (100% voice-only, zero typing)
+            Box(
+                modifier = Modifier
+                    .widthIn(max = 560.dp)
+                    .fillMaxWidth()
+                    .padding(bottom = 18.dp)
+                    .heightIn(min = 58.dp)
+                    .clip(RoundedCornerShape(32.dp))
+                    .background(
+                        Brush.horizontalGradient(
+                            colors = listOf(
+                                Color(0x471E62D8),
+                                Color(0x5E2E7EFF),
+                                Color(0x471E62D8)
+                            )
+                        )
                     )
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        val quickPrompts = listOf(
-                            "Text Alex hey how are you on WhatsApp",
-                            "Like this post",
-                            "Scroll TikTok",
-                            "Study my device",
-                            "Check my voice",
-                            "Daily briefing",
-                            "Guide me on this screen",
-                            "Open YouTube in Chrome",
-                            "Search Reddit for AI news",
-                            "Open Wi-Fi settings"
-                        )
-                        items(quickPrompts) { prompt ->
-                            AssistChip(
-                                onClick = { onQuickVoicePrompt(prompt) },
-                                label = { Text(prompt, style = MaterialTheme.typography.labelLarge) }
+                    .border(
+                        width = 1.dp,
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                Color(0x88AED8FF),
+                                Color(0x40549EFF)
                             )
+                        ),
+                        shape = RoundedCornerShape(32.dp)
+                    )
+                    .clickable(onClick = triggerVoice)
+                    .padding(start = 22.dp, end = 20.dp, top = 12.dp, bottom = 12.dp)
+                    .testTag("home_talk_button")
+                    .semantics {
+                        contentDescription = if (uiState.orbState == OrbState.LISTENING) {
+                            "Stop listening"
+                        } else {
+                            "Speak to JARVIS"
                         }
-                    }
+                    },
+                contentAlignment = Alignment.CenterStart
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = when {
+                            !hasMicPermission -> "Allow microphone for automatic voice..."
+                            uiState.isMicMuted -> "Microphone muted — tap to resume..."
+                            uiState.orbState == OrbState.LISTENING -> "Listening — speak now..."
+                            uiState.orbState == OrbState.SPEAKING -> "Speaking — tap to interrupt..."
+                            settings.wakeWordEnabled -> "Always listening — say \"Hey Jarvis\"..."
+                            else -> "Voice standby — tap to listen..."
+                        },
+                        style = MaterialTheme.typography.bodyLarge.copy(
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Normal
+                        ),
+                        color = Color(0xE0DCEAFF),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    VoiceWaveformGlyph(
+                        color = if (uiState.orbState == OrbState.LISTENING) ArcCyan else Color.White,
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
             }
-
-            // Smart Phone Plugin (Always-on, Mini Orb, Screen Control & Step Guide)
-            item {
-                HudGlassCard(borderColor = ArcCyan.copy(alpha = 0.30f)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Smart Phone Plugin", style = MaterialTheme.typography.titleMedium, color = ArcCyan)
-                        StatusBadge(
-                            text = if (uiState.isScreenHelperEnabled && uiState.hasOverlayPermission) "ACTIVE" else "SETUP",
-                            color = if (uiState.isScreenHelperEnabled && uiState.hasOverlayPermission) ProfitEmerald else WarningAmber
-                        )
-                    }
-                    Spacer(Modifier.height(10.dp))
-
-                    // 1. Hands-Free Wake Word
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                imageVector = if (settings.wakeWordEnabled) Icons.Filled.Mic else Icons.Filled.MicOff,
-                                contentDescription = null,
-                                tint = if (settings.wakeWordEnabled) ProfitEmerald else jc.mutedSlate,
-                                modifier = Modifier.size(22.dp)
-                            )
-                            Spacer(Modifier.width(10.dp))
-                            Column {
-                                Text("Hands-Free \"Hey JARVIS\"", style = MaterialTheme.typography.titleMedium)
-                                Text(
-                                    text = if (settings.wakeWordEnabled) "Listening anytime in the background" else "Wake JARVIS anytime without tapping",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = jc.mutedSlate
-                                )
-                            }
-                        }
-                        Switch(
-                            checked = settings.wakeWordEnabled,
-                            onCheckedChange = { want ->
-                                if (want && !hasMicPermission) onRequestMicPermission() else onToggleAlwaysOn(want)
-                            },
-                            modifier = Modifier.testTag("home_always_on_switch")
-                        )
-                    }
-
-                    Spacer(Modifier.height(10.dp))
-
-                    // 2. Floating Translucent Glowing Orb
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.BubbleChart,
-                                contentDescription = null,
-                                tint = if (settings.floatingOrbEnabled && uiState.hasOverlayPermission) ArcCyan else jc.mutedSlate,
-                                modifier = Modifier.size(22.dp)
-                            )
-                            Spacer(Modifier.width(10.dp))
-                            Column {
-                                Text("Floating Mini-Orb", style = MaterialTheme.typography.titleMedium)
-                                Text(
-                                    text = if (!uiState.hasOverlayPermission) {
-                                        "Tap switch to allow floating over other apps"
-                                    } else if (settings.floatingOrbEnabled) {
-                                        "Opens translucent mini-orb when you say \"Hey JARVIS\""
-                                    } else {
-                                        "Floating mini-orb is off"
-                                    },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = jc.mutedSlate
-                                )
-                            }
-                        }
-                        Switch(
-                            checked = settings.floatingOrbEnabled && uiState.hasOverlayPermission,
-                            onCheckedChange = { want ->
-                                if (want && !uiState.hasOverlayPermission) {
-                                    onRequestOverlayPermission()
-                                } else {
-                                    onToggleFloatingOrb(want)
-                                }
-                            },
-                            modifier = Modifier.testTag("home_floating_orb_switch")
-                        )
-                    }
-
-                    Spacer(Modifier.height(10.dp))
-
-                    // 3. Screen Control & Step Guide (Accessibility)
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { showScreenHelperDisclosure = true }
-                            .testTag("home_screen_helper_row"),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.AccessibilityNew,
-                                contentDescription = null,
-                                tint = if (uiState.isScreenHelperEnabled) ProfitEmerald else WarningAmber,
-                                modifier = Modifier.size(22.dp)
-                            )
-                            Spacer(Modifier.width(10.dp))
-                            Column {
-                                Text("Screen Control & Step Guide", style = MaterialTheme.typography.titleMedium)
-                                Text(
-                                    text = if (uiState.isScreenHelperEnabled) {
-                                        "Active — JARVIS can read screens, fill credentials & guide ID/OTP steps"
-                                    } else {
-                                        "Tap here to enable Android Screen Helper"
-                                    },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = jc.mutedSlate
-                                )
-                            }
-                        }
-                        StatusBadge(
-                            text = if (uiState.isScreenHelperEnabled) "READY" else "SETUP",
-                            color = if (uiState.isScreenHelperEnabled) ProfitEmerald else WarningAmber
-                        )
-                    }
-                }
-            }
-
-            // Saved Logins & Private Credentials Quick Card
-            item {
-                HudGlassCard(borderColor = ElectricBlue.copy(alpha = 0.28f)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Lock,
-                                contentDescription = null,
-                                tint = ProfitEmerald,
-                                modifier = Modifier.size(22.dp)
-                            )
-                            Spacer(Modifier.width(10.dp))
-                            Column {
-                                Text("Saved Logins & Credentials", style = MaterialTheme.typography.titleMedium)
-                                val profileReady = uiState.signupProfile.email.isNotBlank() ||
-                                    uiState.signupProfile.fullName.isNotBlank()
-                                Text(
-                                    text = "${uiState.savedCredentials.size} saved logins • " +
-                                        if (profileReady) "Personal info ready" else "Set up personal info",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = jc.mutedSlate
-                                )
-                            }
-                        }
-                        OutlinedButton(
-                            onClick = { onNavigate(JarvisSection.VAULT) },
-                            modifier = Modifier.testTag("home_open_vault_button")
-                        ) {
-                            Text("Open Vault")
-                        }
-                    }
-                }
-            }
-
-            item { Spacer(Modifier.height(14.dp)) }
         }
     }
+}
 
-    if (showScreenHelperDisclosure) {
-        AlertDialog(
-            onDismissRequest = { showScreenHelperDisclosure = false },
-            title = { Text("Enable JARVIS Screen Helper?") },
-            text = {
-                Text(
-                    "Turning on JARVIS in Android Accessibility Settings lets JARVIS read visible screen elements, analyze open websites or trading apps, fill your encrypted credentials on command, guide ID photo or OTP steps, and navigate Back/Home/Settings. Passwords remain on your device and are never logged."
+@Composable
+private fun GlowingGlassCircleButton(
+    onClick: () -> Unit,
+    contentDescription: String,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .background(
+                Brush.radialGradient(
+                    colors = listOf(
+                        Color(0x661C58BA),
+                        Color(0x470B2659)
+                    )
                 )
-            },
-            confirmButton = {
-                Button(onClick = {
-                    showScreenHelperDisclosure = false
-                    onOpenAccessibilitySettings()
-                }) {
-                    Text("Open Accessibility Settings")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showScreenHelperDisclosure = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
+            )
+            .border(
+                width = 1.dp,
+                brush = Brush.verticalGradient(
+                    colors = listOf(
+                        Color(0x6692C8FF),
+                        Color(0x283677E0)
+                    )
+                ),
+                shape = CircleShape
+            )
+            .semantics { this.contentDescription = contentDescription }
+            .clickable(onClick = onClick)
+    ) {
+        content()
+    }
+}
+
+@Composable
+private fun VoiceWaveformGlyph(
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    Canvas(modifier = modifier) {
+        val barHeights = floatArrayOf(0.28f, 0.56f, 0.92f, 0.52f, 0.28f)
+        val count = barHeights.size
+        val step = size.width / (count + 1f)
+        val strokeW = (size.width * 0.11f).coerceAtLeast(2.dp.toPx())
+        val cy = size.height / 2f
+        for (i in 0 until count) {
+            val x = step * (i + 1f)
+            val halfH = (size.height * barHeights[i]) / 2f
+            drawLine(
+                color = color,
+                start = Offset(x, cy - halfH),
+                end = Offset(x, cy + halfH),
+                strokeWidth = strokeW,
+                cap = StrokeCap.Round
+            )
+        }
     }
 }

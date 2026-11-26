@@ -57,8 +57,10 @@ fun SettingsScreen(
     onRequestMicPermission: () -> Unit,
     onRequestOverlayPermission: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
+    onOpenNotificationAccessSettings: () -> Unit,
     onToggleFloatingOrb: (Boolean) -> Unit,
     onLaunchFloatingOrbNow: () -> Unit,
+    onUpdateOrbInactivityTimeout: (Int) -> Unit,
     onSelectModel: (String) -> Unit,
     onSelectVoicePersonality: (VoicePersonality) -> Unit,
     onUpdateVoiceSpeed: (Float) -> Unit,
@@ -108,8 +110,46 @@ fun SettingsScreen(
             Column {
                 Text("SYSTEM SETTINGS", style = MaterialTheme.typography.headlineMedium, color = ElectricBlue)
                 Text(
-                    "Floating plugin, NVIDIA NIM AI & voice, privacy & GitHub updates",
+                    "Permissions health, companion Mini Orb, NVIDIA NIM AI & voice, GitHub sync",
                     style = MaterialTheme.typography.bodyMedium,
+                    color = jc.mutedSlate
+                )
+            }
+        }
+
+        // Permissions & Background Health Dashboard
+        item {
+            HudGlassCard(borderColor = ArcCyan.copy(alpha = 0.36f)) {
+                Text("PERMISSIONS & BACKGROUND HEALTH", style = MaterialTheme.typography.titleMedium, color = ArcCyan)
+                Spacer(Modifier.height(8.dp))
+                PermissionHealthRow(
+                    label = "Microphone (Voice & Wake Word)",
+                    granted = hasMicPermission,
+                    actionLabel = if (hasMicPermission) "Granted" else "Allow",
+                    onAction = onRequestMicPermission
+                )
+                PermissionHealthRow(
+                    label = "Display Over Other Apps (Mini Orb)",
+                    granted = uiState.hasOverlayPermission,
+                    actionLabel = if (uiState.hasOverlayPermission) "Allowed" else "Allow",
+                    onAction = onRequestOverlayPermission
+                )
+                PermissionHealthRow(
+                    label = "Screen Helper (UI & Social Automation)",
+                    granted = uiState.isScreenHelperEnabled,
+                    actionLabel = if (uiState.isScreenHelperEnabled) "Active" else "Enable",
+                    onAction = { showScreenDisclosure = true }
+                )
+                PermissionHealthRow(
+                    label = "Notification Access (Missed Calls & Texts)",
+                    granted = uiState.hasNotificationAccess,
+                    actionLabel = if (uiState.hasNotificationAccess) "Connected" else "Enable",
+                    onAction = onOpenNotificationAccessSettings
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "Boot & Update Auto-Recovery: Active — restores wake-word and daily device study automatically after device reboot or APK update.",
+                    style = MaterialTheme.typography.bodySmall,
                     color = jc.mutedSlate
                 )
             }
@@ -155,7 +195,7 @@ fun SettingsScreen(
                 SettingToggleRow(
                     title = "Floating Mini-Orb on Wake",
                     subtitle = if (uiState.hasOverlayPermission) {
-                        "Opens a small glowing translucent orb over any app on \"Hey JARVIS\""
+                        "Auto-opens glowing companion Mini Orb when Full App is closed and you say \"Hey JARVIS\""
                     } else {
                         "Grant 'Display over other apps' permission to float over screens"
                     },
@@ -167,6 +207,15 @@ fun SettingsScreen(
                             onToggleFloatingOrb(want)
                         }
                     }
+                )
+                Text(
+                    text = "Mini Orb Auto-Sleep Timeout: ${settings.orbInactivityTimeoutSeconds}s",
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Slider(
+                    value = settings.orbInactivityTimeoutSeconds.toFloat(),
+                    onValueChange = { onUpdateOrbInactivityTimeout(it.toInt()) },
+                    valueRange = 15f..300f
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
@@ -619,6 +668,33 @@ private fun SettingToggleRow(
             onCheckedChange = onCheckedChange,
             modifier = if (testTag != null) Modifier.testTag(testTag) else Modifier
         )
+    }
+    Spacer(Modifier.height(6.dp))
+}
+
+@Composable
+private fun PermissionHealthRow(
+    label: String,
+    granted: Boolean,
+    actionLabel: String,
+    onAction: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                text = if (granted) "Ready" else "Setup recommended",
+                style = MaterialTheme.typography.labelSmall,
+                color = if (granted) ProfitEmerald else WarningAmber
+            )
+        }
+        OutlinedButton(onClick = onAction) {
+            Text(actionLabel)
+        }
     }
     Spacer(Modifier.height(6.dp))
 }

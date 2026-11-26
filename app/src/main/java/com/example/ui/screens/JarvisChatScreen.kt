@@ -1,6 +1,11 @@
 package com.example.ui.screens
 
+import android.content.Intent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -8,24 +13,27 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -36,6 +44,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.example.data.local.ConversationMessageEntity
@@ -51,6 +63,7 @@ import com.example.ui.theme.ArcCyan
 import com.example.ui.theme.ElectricBlue
 import com.example.ui.theme.LocalJarvisColors
 import com.example.ui.theme.ProfitEmerald
+import com.example.ui.theme.WarningAmber
 
 @Composable
 fun JarvisChatScreen(
@@ -61,23 +74,26 @@ fun JarvisChatScreen(
     hasMicPermission: Boolean,
     onRequestMicPermission: () -> Unit,
     onOrbTap: () -> Unit,
+    onToggleMicMute: () -> Unit,
     onInterruptSpeech: () -> Unit,
-    onSendQuery: (String) -> Unit,
-    onAddMemory: (String) -> Unit,
     onDeleteMemory: (Long) -> Unit,
     onClearMemories: () -> Unit,
+    onExportMemoriesText: () -> String,
     onClearChat: () -> Unit
 ) {
+    val context = LocalContext.current
     val jc = LocalJarvisColors.current
-    var inputText by remember { mutableStateOf("") }
     var showMemoryDialog by remember { mutableStateOf(false) }
-    var newMemoryText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
 
     LaunchedEffect(messages.size, uiState.streamingReply) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.size - 1)
         }
+    }
+
+    val triggerVoice = {
+        if (!hasMicPermission) onRequestMicPermission() else onOrbTap()
     }
 
     Column(
@@ -92,9 +108,9 @@ fun JarvisChatScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("J.A.R.V.I.S ASSISTANT", style = MaterialTheme.typography.headlineMedium, color = ElectricBlue)
+                Text("J.A.R.V.I.S VOICE", style = MaterialTheme.typography.headlineMedium, color = ElectricBlue)
                 Text(
-                    text = "Personal Assistant & Floating Plugin • ${settings.selectedModelId.substringAfterLast("/")}",
+                    text = "Oral Conversation • ${settings.selectedModelId.substringAfterLast("/")}",
                     style = MaterialTheme.typography.labelMedium,
                     color = jc.mutedSlate
                 )
@@ -127,10 +143,10 @@ fun JarvisChatScreen(
                 JarvisOrb(
                     state = uiState.orbState,
                     audioLevel = uiState.audioLevel,
-                    onClick = {
-                        if (!hasMicPermission) onRequestMicPermission() else onOrbTap()
-                    },
-                    size = 76.dp
+                    onClick = triggerVoice,
+                    size = 76.dp,
+                    executionProgress = uiState.taskProgress.fraction,
+                    showStateLabel = false
                 )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
@@ -140,7 +156,7 @@ fun JarvisChatScreen(
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        text = "Memory: ${if (settings.memoryEnabled) "${memories.size} stored facts" else "Disabled"} • Live web search active",
+                        text = "Memory: ${if (settings.memoryEnabled) "${memories.size} stored facts" else "Disabled"} • Live voice & web active",
                         style = MaterialTheme.typography.labelSmall,
                         color = jc.mutedSlate
                     )
@@ -148,7 +164,7 @@ fun JarvisChatScreen(
             }
         }
 
-        // Conversation Transcript
+        // Spoken Conversation Transcript
         LazyColumn(
             state = listState,
             modifier = Modifier
@@ -161,13 +177,13 @@ fun JarvisChatScreen(
                 item {
                     HudGlassCard {
                         Text(
-                            text = "Say \"Hey JARVIS\" or ask me anything, Sir.",
+                            text = "Say \"Hey JARVIS\" or tap Speak below, Sir.",
                             style = MaterialTheme.typography.titleMedium,
                             color = ArcCyan
                         )
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            text = "Try: \"Open tradingview.com in Chrome\", \"Sign me up on GitHub with my permission\", \"Guide me on this screen\", \"Analyze what is on my screen\", \"Search the internet for gold market outlook\", or \"Open Wi-Fi settings\".",
+                            text = "Speak naturally: \"Open Chrome\", \"Latest Kenyan news\", \"Check my notifications\", \"Install Spotify\", \"Switch to Mini Orb\", or \"Guide me on this screen\".",
                             style = MaterialTheme.typography.bodyMedium,
                             color = jc.mutedSlate
                         )
@@ -187,7 +203,7 @@ fun JarvisChatScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = if (isUser) if (msg.isVoice) "YOU (VOICE)" else "YOU" else "J.A.R.V.I.S",
+                            text = if (isUser) "YOU (VOICE)" else "J.A.R.V.I.S",
                             style = MaterialTheme.typography.labelMedium,
                             color = if (isUser) ArcCyan else ElectricBlue
                         )
@@ -206,7 +222,7 @@ fun JarvisChatScreen(
             if (uiState.isAiProcessing && uiState.streamingReply.isNotBlank()) {
                 item {
                     HudGlassCard(borderColor = ElectricBlue) {
-                        Text("J.A.R.V.I.S (STREAMING)", style = MaterialTheme.typography.labelMedium, color = ElectricBlue)
+                        Text("J.A.R.V.I.S (SPEAKING)", style = MaterialTheme.typography.labelMedium, color = ElectricBlue)
                         Spacer(Modifier.height(6.dp))
                         Text(uiState.streamingReply, style = MaterialTheme.typography.bodyLarge)
                     }
@@ -214,45 +230,72 @@ fun JarvisChatScreen(
             }
         }
 
-        // Input Bar
+        // Pure Oral Voice Control Dock (zero typing)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 6.dp),
+                .padding(top = 8.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            OutlinedTextField(
-                value = inputText,
-                onValueChange = { inputText = it },
-                placeholder = { Text("Ask online, open Chrome site, sign in, or guide screen...") },
-                singleLine = true,
+            Box(
                 modifier = Modifier
                     .weight(1f)
-                    .testTag("chat_input_field")
-            )
-            IconButton(
-                onClick = {
-                    if (!hasMicPermission) onRequestMicPermission() else onOrbTap()
-                },
-                modifier = Modifier
-                    .size(48.dp)
-                    .testTag("chat_mic_button")
+                    .heightIn(min = 54.dp)
+                    .clip(RoundedCornerShape(28.dp))
+                    .background(
+                        Brush.horizontalGradient(
+                            colors = listOf(
+                                Color(0x4D1E62D8),
+                                Color(0x662E7EFF)
+                            )
+                        )
+                    )
+                    .border(1.dp, Color(0x708ECAFF), RoundedCornerShape(28.dp))
+                    .clickable(onClick = triggerVoice)
+                    .padding(horizontal = 20.dp, vertical = 12.dp)
+                    .testTag("chat_mic_button"),
+                contentAlignment = Alignment.CenterStart
             ) {
-                Icon(Icons.Filled.Mic, contentDescription = "Speak to JARVIS", tint = ArcCyan)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = when {
+                            !hasMicPermission -> "Allow microphone for automatic voice"
+                            uiState.isMicMuted -> "Microphone muted — tap to resume"
+                            uiState.orbState == OrbState.LISTENING -> "Listening — speak naturally"
+                            uiState.orbState == OrbState.SPEAKING -> "Speaking — tap to interrupt"
+                            settings.wakeWordEnabled -> "Always listening — say \"Hey Jarvis\""
+                            else -> "Voice standby"
+                        },
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = Color.White
+                    )
+                    Icon(
+                        imageVector = if (uiState.orbState == OrbState.LISTENING) Icons.Filled.GraphicEq else Icons.Filled.Mic,
+                        contentDescription = "Speak to JARVIS",
+                        tint = if (uiState.orbState == OrbState.LISTENING) ArcCyan else Color.White
+                    )
+                }
             }
+
             IconButton(
-                onClick = {
-                    if (inputText.isNotBlank()) {
-                        onSendQuery(inputText)
-                        inputText = ""
-                    }
-                },
+                onClick = onToggleMicMute,
                 modifier = Modifier
-                    .size(48.dp)
-                    .testTag("chat_send_button")
+                    .size(52.dp)
+                    .clip(RoundedCornerShape(26.dp))
+                    .background(Color(0x3314264A))
+                    .border(1.dp, Color(0x446EC1FF), RoundedCornerShape(26.dp))
+                    .testTag("chat_mute_button")
             ) {
-                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send prompt", tint = ElectricBlue)
+                Icon(
+                    imageVector = if (uiState.isMicMuted) Icons.Filled.MicOff else Icons.Filled.Mic,
+                    contentDescription = if (uiState.isMicMuted) "Unmute microphone" else "Mute microphone",
+                    tint = if (uiState.isMicMuted) WarningAmber else ArcCyan
+                )
             }
         }
     }
@@ -260,33 +303,42 @@ fun JarvisChatScreen(
     if (showMemoryDialog) {
         AlertDialog(
             onDismissRequest = { showMemoryDialog = false },
-            title = { Text("Conversational Memory") },
+            title = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Long-Term Memory")
+                    IconButton(
+                        onClick = {
+                            val exportPayload = onExportMemoriesText()
+                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_SUBJECT, "JARVIS Long-Term Memory Export")
+                                putExtra(Intent.EXTRA_TEXT, exportPayload)
+                            }
+                            runCatching {
+                                context.startActivity(Intent.createChooser(shareIntent, "Export JARVIS Memories"))
+                            }
+                        },
+                        modifier = Modifier.testTag("export_memories_button")
+                    ) {
+                        Icon(Icons.Filled.Share, contentDescription = "Export memories", tint = ArcCyan)
+                    }
+                }
+            },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedTextField(
-                            value = newMemoryText,
-                            onValueChange = { newMemoryText = it },
-                            label = { Text("Save preference/note") },
-                            singleLine = true,
-                            modifier = Modifier.weight(1f)
-                        )
-                        IconButton(onClick = {
-                            if (newMemoryText.isNotBlank()) {
-                                onAddMemory(newMemoryText)
-                                newMemoryText = ""
-                            }
-                        }) {
-                            Icon(Icons.Filled.BookmarkAdd, contentDescription = "Save memory")
-                        }
-                    }
+                    Text(
+                        text = "Tell JARVIS \"remember that...\" anytime in conversation to store facts here.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = jc.mutedSlate
+                    )
                     if (memories.isEmpty()) {
                         Text("No stored memories yet.", style = MaterialTheme.typography.bodyMedium, color = jc.mutedSlate)
                     } else {
-                        memories.take(6).forEach { mem ->
+                        memories.take(8).forEach { mem ->
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,

@@ -7,12 +7,16 @@ import androidx.lifecycle.viewModelScope
 import com.example.JarvisApplication
 import com.example.assistant.JarvisAccessibilityService
 import com.example.assistant.JarvisSystemAssistant
+import com.example.assistant.NotificationVaultBridge
 import com.example.data.local.AiActivityLogEntity
 import com.example.data.local.ConversationMessageEntity
 import com.example.data.local.JarvisUserSettings
 import com.example.data.local.MemoryFactEntity
 import com.example.domain.model.ApiIntegrationStatus
+import com.example.domain.model.AssistantUiMode
 import com.example.domain.model.OrbState
+import com.example.domain.model.TaskExecutionProgress
+import com.example.domain.model.TaskStage
 import com.example.domain.model.VoicePersonality
 import com.example.security.SecretsConfig
 import com.example.security.SecureCredentialStore
@@ -44,6 +48,7 @@ data class JarvisUiState(
     val voiceStatusDetail: String = "Standby",
     val partialVoiceText: String = "",
     val bluetoothAudioReady: Boolean = false,
+    val isMicMuted: Boolean = false,
     val isAiProcessing: Boolean = false,
     val streamingReply: String = "",
     val apiStatuses: List<ApiIntegrationStatus> = emptyList(),
@@ -52,6 +57,10 @@ data class JarvisUiState(
     val snackbarMessage: String? = null,
     val hasOverlayPermission: Boolean = false,
     val isScreenHelperEnabled: Boolean = false,
+    val hasNotificationAccess: Boolean = false,
+    val unreadNotificationCount: Int = 0,
+    val activeUiMode: AssistantUiMode = AssistantUiMode.FULL_APP,
+    val taskProgress: TaskExecutionProgress = TaskExecutionProgress(),
     val signupProfile: SecureCredentialStore.SignupProfile = SecureCredentialStore.SignupProfile(),
     val savedCredentials: List<SecureCredentialStore.SavedCredentialEntry> = emptyList(),
     val manualUpdateCheckTrigger: Int = 0,
@@ -108,6 +117,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     fun refreshSystemCapabilitiesState() {
         val overlayOk = Settings.canDrawOverlays(app)
         val screenOk = JarvisAccessibilityService.isConnected.value
+        val notifOk = NotificationVaultBridge.isAccessGranted(app)
         val profile = credentialStore.getSignupProfile()
         val credentials = credentialStore.getSavedCredentials()
         val hasRuntimeKey = !credentialStore.getDecrypted(SecureCredentialStore.KEY_NVIDIA_NIM_API_OVERRIDE).isNullOrBlank()
@@ -117,6 +127,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             it.copy(
                 hasOverlayPermission = overlayOk,
                 isScreenHelperEnabled = screenOk,
+                hasNotificationAccess = notifOk,
                 signupProfile = profile,
                 savedCredentials = credentials,
                 hasRuntimeNvidiaKeyOverride = hasRuntimeKey,
@@ -132,18 +143,36 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 coordinator.isProcessing,
                 coordinator.streamingReply,
                 coordinator.autonomousStepStatus,
-                coordinator.pendingConfirmationSummary
-            ) { processing, streaming, stepStatus, pendingConfirm ->
-                Tuple4(processing, streaming, stepStatus, pendingConfirm)
-            }.collect { (processing, streaming, stepStatus, pendingConfirm) ->
-                _uiState.update {
-                    it.copy(
+                coordinator.pendingConfirmationSummary,
+                coordinator.taskProgress
+            ) { processing, streaming, stepStatus, pendingConfirm, taskProg ->
+                Tuple5(processing, streaming, stepStatus, pendingConfirm, taskProg)
+            }.collect { (processing, streaming, stepStatus, pendingConfirm, taskProg) ->
+                _uiState.update { state ->
+                    val orb = voiceEngine.suggestedOrbState(
+                        isAiProcessing = processing,
+                        hasCriticalAlert = false,
+                        taskStage = taskProg.stage
+                    )
+                    state.copy(
                         isAiProcessing = processing,
                         streamingReply = streaming,
                         autonomousStepStatus = stepStatus,
-                        pendingConfirmationSummary = pendingConfirm
+                        pendingConfirmationSummary = pendingConfirm,
+                        taskProgress = taskProg,
+                        orbState = orb
                     )
                 }
+            }
+        }
+        viewModelScope.launch {
+            coordinator.sessionManager.activeMode.collect { mode ->
+                _uiState.update { it.copy(activeUiMode = mode) }
+            }
+        }
+        viewModelScope.launch {
+            NotificationVaultBridge.notifications.collect { list ->
+                _uiState.update { it.copy(unreadNotificationCount = list.size) }
             }
         }
         viewModelScope.launch {
@@ -217,7 +246,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 Tuple5(phase, rms, partial, detail, bt)
             }.collect { (_, rms, partial, detail, bt) ->
                 _uiState.update { state ->
-                    val orb = voiceEngine.suggestedOrbState(state.isAiProcessing, hasCriticalAlert = false)
+                    val orb = voiceEngine.suggestedOrbState(
+                        isAiProcessing = state.isAiProcessing,
+                        hasCriticalAlert = false,
+                        taskStage = state.taskProgress.stage
+                    )
                     state.copy(
                         orbState = orb,
                         audioLevel = rms,
@@ -226,6 +259,12 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                         bluetoothAudioReady = bt
                     )
                 }
+            }
+        }
+
+        viewModelScope.launch {
+            voiceEngine.isMuted.collect { muted ->
+                _uiState.update { it.copy(isMicMuted = muted) }
             }
         }
 
@@ -294,7 +333,28 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         refreshApiStatuses()
     }
 
+    fun toggleMicMute() {
+        val mutedNow = voiceEngine.toggleMute()
+        _uiState.update {
+            it.copy(
+                isMicMuted = mutedNow,
+                snackbarMessage = if (mutedNow) "Microphone muted, Sir." else "Microphone unmuted, Sir."
+            )
+        }
+    }
+
+    fun switchToMiniOrb() {
+        if (!Settings.canDrawOverlays(app)) {
+            _uiState.update { it.copy(snackbarMessage = "Grant 'Display over other apps' to switch to Mini Orb.") }
+            return
+        }
+        coordinator.submitQuery("Switch to Mini Orb", fromVoice = false)
+    }
+
     fun onOrbTapped(hasMicPermission: Boolean) {
+        if (voiceEngine.isMuted.value) {
+            voiceEngine.setMuted(false)
+        }
         val currentPhase = voiceEngine.phase.value
         if (currentPhase == VoicePipelinePhase.SPEAKING_RESPONSE) {
             voiceEngine.interruptSpeech()
@@ -331,6 +391,16 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun ensureAlwaysListeningRunning(hasMicPermission: Boolean) {
+        if (!hasMicPermission) return
+        if (!settings.value.wakeWordEnabled) return
+        if (voiceEngine.isMuted.value) return
+        if (voiceEngine.phase.value == VoicePipelinePhase.STOPPED) {
+            JarvisVoiceService.start(app)
+            voiceEngine.startAlwaysOnWakeWordLoop()
+        }
+    }
+
     fun sendUserQuery(rawPrompt: String, fromVoice: Boolean = false) {
         coordinator.submitQuery(rawPrompt, fromVoice = fromVoice)
     }
@@ -357,6 +427,26 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun updateMemory(id: Long, summary: String) {
+        if (summary.isBlank()) return
+        viewModelScope.launch {
+            localRepo.updateMemory(id, summary.trim())
+            _uiState.update { it.copy(snackbarMessage = "Memory updated, Sir.") }
+        }
+    }
+
+    fun buildMemoriesExportText(): String {
+        val list = memories.value
+        if (list.isEmpty()) return "J.A.R.V.I.S Memory Vault is currently empty."
+        return buildString {
+            appendLine("J.A.R.V.I.S Long-Term Memory Export")
+            appendLine("====================================")
+            list.forEachIndexed { idx, fact ->
+                appendLine("${idx + 1}. [${fact.category}] ${fact.summary}")
+            }
+        }
+    }
+
     fun deleteMemory(id: Long) = viewModelScope.launch { localRepo.deleteMemory(id) }
     fun clearAllMemories() = viewModelScope.launch { localRepo.clearAllMemories() }
     fun clearChatHistory() = viewModelScope.launch { localRepo.clearConversationHistory() }
@@ -369,6 +459,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     fun setUseNvidiaMagpieVoice(enabled: Boolean) = viewModelScope.launch { prefsRepo.setUseNvidiaMagpieVoice(enabled) }
     fun setMemoryEnabled(enabled: Boolean) = viewModelScope.launch { prefsRepo.setMemoryEnabled(enabled) }
     fun setHighContrastHud(enabled: Boolean) = viewModelScope.launch { prefsRepo.setHighContrastHud(enabled) }
+    fun setOrbInactivityTimeoutSeconds(seconds: Int) = viewModelScope.launch {
+        prefsRepo.setOrbInactivityTimeoutSeconds(seconds)
+    }
 
     fun setFloatingOrbEnabled(enabled: Boolean) = viewModelScope.launch {
         prefsRepo.setFloatingOrbEnabled(enabled)
@@ -604,6 +697,5 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(apiStatuses = statuses) }
     }
 
-    private data class Tuple4<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)
     private data class Tuple5<A, B, C, D, E>(val a: A, val b: B, val c: C, val d: D, val e: E)
 }

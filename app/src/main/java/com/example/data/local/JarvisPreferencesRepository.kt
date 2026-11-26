@@ -26,7 +26,7 @@ data class JarvisUserSettings(
     val selectedModelId: String = AiModelOption.catalog.first().id,
     val voicePersonality: VoicePersonality = VoicePersonality.JARVIS_CLASSIC,
     val voiceSpeed: Float = 1.02f,
-    val wakeWordEnabled: Boolean = false,
+    val wakeWordEnabled: Boolean = true,
     val voiceOutputEnabled: Boolean = true,
     val useNvidiaMagpieVoice: Boolean = true,
     val memoryEnabled: Boolean = true,
@@ -52,7 +52,8 @@ data class JarvisUserSettings(
     val voiceFluAdaptationEnabled: Boolean = true,
     val autoLearnDeviceDaily: Boolean = true,
     val futuristicHudMode: Boolean = true,
-    val lastDailyLearnMs: Long = 0L
+    val lastDailyLearnMs: Long = 0L,
+    val orbInactivityTimeoutSeconds: Int = 45
 ) {
     val operatingMode: TradingOperatingMode
         get() = when {
@@ -103,6 +104,7 @@ class JarvisPreferencesRepository(private val context: Context) {
         val AUTO_LEARN_DAILY = booleanPreferencesKey("auto_learn_device_daily")
         val FUTURISTIC_HUD_MODE = booleanPreferencesKey("futuristic_hud_mode")
         val LAST_DAILY_LEARN_MS = longPreferencesKey("last_daily_learn_ms")
+        val ORB_INACTIVITY_SECONDS = intPreferencesKey("orb_inactivity_seconds")
     }
 
     val settingsFlow: Flow<JarvisUserSettings> = context.jarvisDataStore.data.map { prefs ->
@@ -138,7 +140,7 @@ class JarvisPreferencesRepository(private val context: Context) {
             selectedModelId = AiModelOption.normalizeModelId(prefs[Keys.MODEL_ID]),
             voicePersonality = personality,
             voiceSpeed = prefs[Keys.VOICE_SPEED] ?: personality.rate,
-            wakeWordEnabled = prefs[Keys.WAKE_WORD_ENABLED] ?: false,
+            wakeWordEnabled = prefs[Keys.WAKE_WORD_ENABLED] ?: true,
             voiceOutputEnabled = prefs[Keys.VOICE_OUTPUT_ENABLED] ?: true,
             useNvidiaMagpieVoice = prefs[Keys.USE_NVIDIA_MAGPIE_VOICE] ?: true,
             memoryEnabled = prefs[Keys.MEMORY_ENABLED] ?: true,
@@ -173,7 +175,8 @@ class JarvisPreferencesRepository(private val context: Context) {
             voiceFluAdaptationEnabled = prefs[Keys.VOICE_FLU_ADAPTATION] ?: true,
             autoLearnDeviceDaily = prefs[Keys.AUTO_LEARN_DAILY] ?: true,
             futuristicHudMode = prefs[Keys.FUTURISTIC_HUD_MODE] ?: true,
-            lastDailyLearnMs = prefs[Keys.LAST_DAILY_LEARN_MS] ?: 0L
+            lastDailyLearnMs = prefs[Keys.LAST_DAILY_LEARN_MS] ?: 0L,
+            orbInactivityTimeoutSeconds = (prefs[Keys.ORB_INACTIVITY_SECONDS] ?: 45).coerceIn(15, 300)
         )
     }
 
@@ -384,5 +387,9 @@ class JarvisPreferencesRepository(private val context: Context) {
 
     suspend fun markDailyLearnCompleted(timestampMs: Long = System.currentTimeMillis()) {
         context.jarvisDataStore.edit { it[Keys.LAST_DAILY_LEARN_MS] = timestampMs }
+    }
+
+    suspend fun setOrbInactivityTimeoutSeconds(seconds: Int) {
+        context.jarvisDataStore.edit { it[Keys.ORB_INACTIVITY_SECONDS] = seconds.coerceIn(15, 300) }
     }
 }

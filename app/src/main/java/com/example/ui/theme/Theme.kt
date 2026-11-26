@@ -19,6 +19,8 @@ data class JarvisExtendedColors(
     val glassElevated: Color,
     val electricBlue: Color,
     val arcCyan: Color,
+    val softTurquoise: Color,
+    val softViolet: Color,
     val profitEmerald: Color,
     val warningAmber: Color,
     val alertCrimson: Color,
@@ -34,6 +36,8 @@ val LocalJarvisColors = staticCompositionLocalOf {
         glassElevated = GlassPanelElevated,
         electricBlue = ElectricBlue,
         arcCyan = ArcCyan,
+        softTurquoise = SoftTurquoise,
+        softViolet = SoftViolet,
         profitEmerald = ProfitEmerald,
         warningAmber = WarningAmber,
         alertCrimson = AlertCrimson,
@@ -47,11 +51,11 @@ private val JarvisDarkColorScheme = darkColorScheme(
     onPrimary = ObsidianBlack,
     primaryContainer = Color(0xFF003B5C),
     onPrimaryContainer = ArcCyan,
-    secondary = ArcBlue,
+    secondary = SoftViolet,
     onSecondary = FrostWhite,
     secondaryContainer = DeepSlateNavy,
     onSecondaryContainer = FrostWhite,
-    tertiary = ArcCyan,
+    tertiary = SoftTurquoise,
     onTertiary = ObsidianBlack,
     background = ObsidianBlack,
     onBackground = FrostWhite,
@@ -60,7 +64,7 @@ private val JarvisDarkColorScheme = darkColorScheme(
     surfaceVariant = DeepSlateNavy,
     onSurfaceVariant = MutedCyanSlate,
     outline = SubtleBorderBlue,
-    outlineVariant = Color(0x2267E8F9),
+    outlineVariant = Color(0x2067E8F9),
     error = AlertCrimson,
     onError = FrostWhite
 )
@@ -69,15 +73,15 @@ private val JarvisHighContrastScheme = JarvisDarkColorScheme.copy(
     background = Color(0xFF000000),
     surface = Color(0xFF040812),
     surfaceVariant = Color(0xFF091326),
-    outline = Color(0x8800D4FF)
+    outline = Color(0x6600D4FF)
 )
 
 val JarvisShapes = Shapes(
-    extraSmall = RoundedCornerShape(6.dp),
-    small = RoundedCornerShape(10.dp),
-    medium = RoundedCornerShape(14.dp),
-    large = RoundedCornerShape(18.dp),
-    extraLarge = RoundedCornerShape(24.dp)
+    extraSmall = RoundedCornerShape(8.dp),
+    small = RoundedCornerShape(12.dp),
+    medium = RoundedCornerShape(16.dp),
+    large = RoundedCornerShape(20.dp),
+    extraLarge = RoundedCornerShape(28.dp)
 )
 
 @Composable
@@ -89,15 +93,17 @@ fun JarvisTheme(
         JarvisExtendedColors(
             obsidianBg = Color(0xFF000000),
             midnightSurface = Color(0xFF040812),
-            glassSurface = Color(0xE0070E1E),
-            glassElevated = Color(0xF20C1830),
+            glassSurface = Color(0xDE070E1E),
+            glassElevated = Color(0xF00C1830),
             electricBlue = ElectricBlue,
             arcCyan = ArcCyan,
+            softTurquoise = SoftTurquoise,
+            softViolet = SoftViolet,
             profitEmerald = ProfitEmerald,
             warningAmber = WarningAmber,
             alertCrimson = AlertCrimson,
             mutedSlate = Color(0xFFB5CBE3),
-            hairlineGlow = Color(0x6600D4FF)
+            hairlineGlow = Color(0x5200D4FF)
         )
     } else {
         JarvisExtendedColors(
@@ -107,6 +113,8 @@ fun JarvisTheme(
             glassElevated = GlassPanelElevated,
             electricBlue = ElectricBlue,
             arcCyan = ArcCyan,
+            softTurquoise = SoftTurquoise,
+            softViolet = SoftViolet,
             profitEmerald = ProfitEmerald,
             warningAmber = WarningAmber,
             alertCrimson = AlertCrimson,
