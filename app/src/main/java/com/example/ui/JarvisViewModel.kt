@@ -1,17 +1,24 @@
 package com.example.ui
 
 import android.app.Application
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import android.provider.Settings
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.JarvisApplication
+import com.example.assistant.FuturisticMissionSuggestion
 import com.example.assistant.JarvisAccessibilityService
 import com.example.assistant.JarvisSystemAssistant
 import com.example.assistant.NotificationVaultBridge
+import com.example.assistant.OfflineAssistantEngine
 import com.example.data.local.AiActivityLogEntity
 import com.example.data.local.ConversationMessageEntity
+import com.example.data.local.DeviceAppKnowledgeEntity
 import com.example.data.local.JarvisUserSettings
 import com.example.data.local.MemoryFactEntity
+import com.example.data.local.ScheduledAutomationEntity
 import com.example.domain.model.ApiIntegrationStatus
 import com.example.domain.model.AssistantUiMode
 import com.example.domain.model.OrbState
@@ -24,6 +31,7 @@ import com.example.voice.JarvisFloatingOrbService
 import com.example.voice.JarvisVoiceService
 import com.example.voice.SpeakerMatchState
 import com.example.voice.VoicePipelinePhase
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -75,7 +83,15 @@ data class JarvisUiState(
     val speakerConfidence: Float = 0f,
     val voiceEnrollmentProgress: String? = null,
     val autonomousStepStatus: String = "",
-    val pendingConfirmationSummary: String? = null
+    val pendingConfirmationSummary: String? = null,
+    val hasDeviceSafeWord: Boolean = false,
+    val deviceUnlockPatternLength: Int = 0,
+    val lastUserPrompt: String = "",
+    val aiHudHeadline: String? = null,
+    val isOnline: Boolean = true,
+    val batteryPercent: Int = 100,
+    val isCharging: Boolean = false,
+    val hudRotationTick: Int = 0
 )
 
 class JarvisViewModel(application: Application) : AndroidViewModel(application) {
@@ -105,11 +121,18 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     val aiLogs: StateFlow<List<AiActivityLogEntity>> = localRepo.aiLogs
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val scheduledAutomations: StateFlow<List<ScheduledAutomationEntity>> = localRepo.scheduledAutomations
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val learnedApps: StateFlow<List<DeviceAppKnowledgeEntity>> = localRepo.learnedApps
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     init {
         coordinator.attachVoiceEngineCallbacks()
         observeVoiceTelemetry()
         observeCoordinatorState()
         observeLearningAndBiometrics()
+        observeLiveHudTelemetryLoop()
         refreshSystemCapabilitiesState()
         refreshApiStatuses()
     }
@@ -123,6 +146,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         val hasRuntimeKey = !credentialStore.getDecrypted(SecureCredentialStore.KEY_NVIDIA_NIM_API_OVERRIDE).isNullOrBlank()
         val hasBuildKey = SecretsConfig.hasBuildConfigNvidiaNim
         val voiceEnrolled = voiceEngine.isOwnerVoiceEnrolled()
+        val hasSafeWord = credentialStore.hasDeviceSafeWord()
+        val patternLen = credentialStore.getDeviceUnlockPattern().size
         _uiState.update {
             it.copy(
                 hasOverlayPermission = overlayOk,
@@ -132,7 +157,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 savedCredentials = credentials,
                 hasRuntimeNvidiaKeyOverride = hasRuntimeKey,
                 hasBuildConfigNvidiaKey = hasBuildKey,
-                voiceEnrolled = voiceEnrolled
+                voiceEnrolled = voiceEnrolled,
+                hasDeviceSafeWord = hasSafeWord,
+                deviceUnlockPatternLength = patternLen
             )
         }
     }
@@ -193,6 +220,45 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.update { it.copy(isScreenHelperEnabled = connected) }
             }
         }
+        viewModelScope.launch {
+            combine(
+                coordinator.lastUserPrompt,
+                coordinator.aiHudHeadline
+            ) { prompt, aiHeadline ->
+                prompt to aiHeadline
+            }.collect { (prompt, aiHeadline) ->
+                _uiState.update { it.copy(lastUserPrompt = prompt, aiHudHeadline = aiHeadline) }
+            }
+        }
+    }
+
+    private fun observeLiveHudTelemetryLoop() {
+        viewModelScope.launch {
+            while (true) {
+                val (pct, charging) = readBatteryStatus()
+                val online = OfflineAssistantEngine.isNetworkConnected(app)
+                _uiState.update { state ->
+                    state.copy(
+                        isOnline = online,
+                        batteryPercent = pct,
+                        isCharging = charging,
+                        hudRotationTick = state.hudRotationTick + 1
+                    )
+                }
+                delay(16_000L)
+            }
+        }
+    }
+
+    private fun readBatteryStatus(): Pair<Int, Boolean> {
+        val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+        val batteryStatus = app.registerReceiver(null, filter)
+        val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
+        val pct = if (level >= 0 && scale > 0) ((level * 100f) / scale).toInt().coerceIn(0, 100) else 100
+        val status = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        val charging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+        return pct to charging
     }
 
     private fun observeLearningAndBiometrics() {
@@ -475,6 +541,55 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         prefsRepo.setFuturisticHudMode(enabled)
     }
 
+    fun setKeepScreenAwakeWhileActive(enabled: Boolean) = viewModelScope.launch {
+        prefsRepo.setKeepScreenAwakeWhileActive(enabled)
+    }
+
+    fun setDeviceUnlockEnabled(enabled: Boolean) = viewModelScope.launch {
+        prefsRepo.setDeviceUnlockEnabled(enabled)
+    }
+
+    fun saveDeviceUnlockSafeWord(safeWord: String) {
+        val clean = safeWord.trim()
+        if (clean.length < 2) {
+            _uiState.update { it.copy(snackbarMessage = "Enter a Safe Word of at least 2 characters, Sir.") }
+            return
+        }
+        credentialStore.saveDeviceSafeWord(clean)
+        _uiState.update {
+            it.copy(
+                hasDeviceSafeWord = true,
+                snackbarMessage = "Device Safe Word encrypted & saved locally, Sir."
+            )
+        }
+    }
+
+    fun saveDeviceUnlockPattern(dots: List<Int>) {
+        if (dots.size < 4 || dots.any { it !in 1..9 }) {
+            _uiState.update { it.copy(snackbarMessage = "Connect at least 4 dots for your unlock pattern, Sir.") }
+            return
+        }
+        credentialStore.saveDeviceUnlockPattern(dots)
+        _uiState.update {
+            it.copy(
+                deviceUnlockPatternLength = dots.size,
+                snackbarMessage = "Unlock pattern (${dots.size} dots) encrypted & saved locally, Sir."
+            )
+        }
+    }
+
+    fun clearDeviceUnlockCredentials() {
+        credentialStore.clearDeviceUnlockCredentials()
+        viewModelScope.launch { prefsRepo.setDeviceUnlockEnabled(false) }
+        _uiState.update {
+            it.copy(
+                hasDeviceSafeWord = false,
+                deviceUnlockPatternLength = 0,
+                snackbarMessage = "Saved unlock Safe Word and pattern cleared from Keystore."
+            )
+        }
+    }
+
     fun enrollOwnerVoice() {
         if (!voiceEngine.hasMicPermission()) {
             _uiState.update { it.copy(snackbarMessage = "Microphone permission is required to enroll your Voice ID, Sir.") }
@@ -554,6 +669,33 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     fun abortAutonomousTasks() {
         coordinator.abortAllPendingActions()
         _uiState.update { it.copy(snackbarMessage = "All active JARVIS screen actions aborted, Sir.") }
+    }
+
+    fun cycleHudHeadline() {
+        _uiState.update {
+            it.copy(
+                aiHudHeadline = null,
+                hudRotationTick = it.hudRotationTick + 1
+            )
+        }
+    }
+
+    fun triggerOrScheduleSuggestion(suggestion: FuturisticMissionSuggestion) {
+        coordinator.triggerOrScheduleSuggestion(suggestion)
+    }
+
+    fun runAutomationNow(task: ScheduledAutomationEntity) {
+        _uiState.update { it.copy(snackbarMessage = "Running \"${task.title}\" now, Sir.") }
+        coordinator.submitQuery(task.commandPrompt, fromVoice = false)
+    }
+
+    fun toggleAutomation(id: Long, enabled: Boolean) {
+        coordinator.toggleScheduledAutomation(id, enabled)
+    }
+
+    fun deleteAutomation(id: Long) {
+        coordinator.deleteScheduledAutomation(id)
+        _uiState.update { it.copy(snackbarMessage = "Scheduled automation removed, Sir.") }
     }
 
     fun saveSignupProfile(profile: SecureCredentialStore.SignupProfile) {

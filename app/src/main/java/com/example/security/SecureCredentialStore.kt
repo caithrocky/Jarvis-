@@ -271,6 +271,67 @@ class SecureCredentialStore(context: Context) {
         remove(KEY_OWNER_VOICE_PROFILE_JSON)
     }
 
+    fun saveDeviceSafeWord(safeWord: String) {
+        val cleaned = safeWord.trim()
+        if (cleaned.isBlank()) {
+            remove(KEY_DEVICE_SAFE_WORD)
+        } else {
+            putEncrypted(KEY_DEVICE_SAFE_WORD, cleaned)
+        }
+    }
+
+    fun getDeviceSafeWord(): String = getDecrypted(KEY_DEVICE_SAFE_WORD).orEmpty()
+
+    fun hasDeviceSafeWord(): Boolean = getDeviceSafeWord().isNotBlank()
+
+    fun verifySafeWord(spokenText: String): Boolean {
+        val expected = normalizeSafeWordPhrase(getDeviceSafeWord())
+        if (expected.isBlank()) return false
+        val spokenNorm = normalizeSafeWordPhrase(spokenText)
+        if (spokenNorm == expected) return true
+        val strippedLead = spokenNorm
+            .removePrefix("my safe word is ")
+            .removePrefix("the safe word is ")
+            .removePrefix("safe word is ")
+            .removePrefix("safe word ")
+            .removePrefix("it is ")
+            .removePrefix("its ")
+            .removePrefix("it's ")
+            .trim()
+        return strippedLead == expected
+    }
+
+    private fun normalizeSafeWordPhrase(raw: String): String =
+        raw.lowercase(Locale.US)
+            .replace(Regex("[^a-z0-9\\s]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+    fun saveDeviceUnlockPattern(dots: List<Int>) {
+        val valid = dots.filter { it in 1..9 }.distinct()
+        if (valid.size < 4) {
+            remove(KEY_DEVICE_UNLOCK_PATTERN)
+        } else {
+            putEncrypted(KEY_DEVICE_UNLOCK_PATTERN, valid.joinToString(","))
+        }
+    }
+
+    fun getDeviceUnlockPattern(): List<Int> {
+        val raw = getDecrypted(KEY_DEVICE_UNLOCK_PATTERN).orEmpty()
+        if (raw.isBlank()) return emptyList()
+        return raw.split(",")
+            .mapNotNull { it.trim().toIntOrNull() }
+            .filter { it in 1..9 }
+            .distinct()
+    }
+
+    fun hasDeviceUnlockPattern(): Boolean = getDeviceUnlockPattern().size >= 4
+
+    fun clearDeviceUnlockCredentials() {
+        remove(KEY_DEVICE_SAFE_WORD)
+        remove(KEY_DEVICE_UNLOCK_PATTERN)
+    }
+
     data class OwnerVoiceProfile(
         val anchorBands: DoubleArray,
         val adaptiveBands: DoubleArray,
@@ -349,5 +410,7 @@ class SecureCredentialStore(context: Context) {
         const val KEY_SAVED_CREDENTIALS_JSON = "saved_credentials_json"
         const val KEY_NVIDIA_NIM_API_OVERRIDE = "nvidia_nim_api_override"
         const val KEY_OWNER_VOICE_PROFILE_JSON = "owner_voice_profile_json"
+        const val KEY_DEVICE_SAFE_WORD = "device_safe_word"
+        const val KEY_DEVICE_UNLOCK_PATTERN = "device_unlock_pattern"
     }
 }

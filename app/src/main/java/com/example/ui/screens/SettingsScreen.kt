@@ -5,7 +5,13 @@ import android.content.Intent
 import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -15,26 +21,46 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.core.content.pm.PackageInfoCompat
 import com.example.data.local.JarvisUserSettings
@@ -48,6 +74,7 @@ import com.example.ui.theme.ElectricBlue
 import com.example.ui.theme.LocalJarvisColors
 import com.example.ui.theme.ProfitEmerald
 import com.example.ui.theme.WarningAmber
+import kotlin.math.hypot
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -84,7 +111,12 @@ fun SettingsScreen(
     onVerifyOwnerVoice: () -> Unit,
     onClearOwnerVoice: () -> Unit,
     onToggleAutoLearnDaily: (Boolean) -> Unit,
-    onStudyDeviceNow: () -> Unit
+    onStudyDeviceNow: () -> Unit,
+    onToggleKeepScreenAwake: (Boolean) -> Unit,
+    onToggleDeviceUnlockEnabled: (Boolean) -> Unit,
+    onSaveSafeWord: (String) -> Unit,
+    onSaveUnlockPattern: (List<Int>) -> Unit,
+    onClearUnlockCredentials: () -> Unit
 ) {
     val context = LocalContext.current
     val jc = LocalJarvisColors.current
@@ -329,11 +361,18 @@ fun SettingsScreen(
                 Spacer(Modifier.height(8.dp))
                 SettingToggleRow(
                     title = "Always-On \"Hey JARVIS\" Listener",
-                    subtitle = "Runs foreground microphone service with silent voice detection",
+                    subtitle = "Runs foreground microphone service with sleep wake-lock even when screen is off",
                     checked = settings.wakeWordEnabled,
                     onCheckedChange = { want ->
                         if (want && !hasMicPermission) onRequestMicPermission() else onToggleAlwaysOn(want)
                     }
+                )
+                SettingToggleRow(
+                    title = "Keep Screen Awake While Active",
+                    subtitle = "Prevents phone auto-sleep while JARVIS is active unless you say \"Make the device sleep\"",
+                    checked = settings.keepScreenAwakeWhileActive,
+                    onCheckedChange = onToggleKeepScreenAwake,
+                    testTag = "toggle_keep_screen_awake"
                 )
                 SettingToggleRow(
                     title = "Spoken Neural Responses",
@@ -459,6 +498,173 @@ fun SettingsScreen(
                             .testTag("clear_owner_voice_btn")
                     ) {
                         Text("Clear Saved Owner Voiceprint")
+                    }
+                }
+            }
+        }
+
+        // Voice Device Unlock (Safe Word + 3x3 Pattern Grid)
+        item {
+            var safeWordDraft by remember { mutableStateOf("") }
+            var showSafeWord by remember { mutableStateOf(false) }
+            val draftPattern = remember { mutableStateListOf<Int>() }
+            val unlockReady = settings.deviceUnlockEnabled &&
+                uiState.hasDeviceSafeWord &&
+                uiState.deviceUnlockPatternLength >= 4
+
+            HudGlassCard(borderColor = ArcCyan.copy(alpha = 0.4f)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("VOICE DEVICE UNLOCK & SAFE WORD", style = MaterialTheme.typography.titleMedium, color = ArcCyan)
+                    StatusBadge(
+                        text = if (unlockReady) "READY" else "SETUP",
+                        color = if (unlockReady) ProfitEmerald else WarningAmber
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "When your phone is asleep, say \"Open the device\" or \"Unlock my phone\". JARVIS wakes the screen, asks for your Safe Word, and if confirmed draws your saved pattern.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = jc.mutedSlate
+                )
+                Spacer(Modifier.height(8.dp))
+                SettingToggleRow(
+                    title = "Enable Voice Unlock From Sleep",
+                    subtitle = "Requires Screen Helper + Safe Word + 3x3 Pattern saved in Keystore",
+                    checked = settings.deviceUnlockEnabled,
+                    onCheckedChange = onToggleDeviceUnlockEnabled,
+                    testTag = "toggle_device_unlock"
+                )
+                Text(
+                    text = "Safe Word: ${if (uiState.hasDeviceSafeWord) "Saved in Keystore" else "Not set yet"}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (uiState.hasDeviceSafeWord) ProfitEmerald else WarningAmber
+                )
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = safeWordDraft,
+                    onValueChange = { safeWordDraft = it },
+                    label = { Text("Set or Update Safe Word") },
+                    placeholder = { Text("e.g. open sesame or falcon") },
+                    singleLine = true,
+                    visualTransformation = if (showSafeWord) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { showSafeWord = !showSafeWord }) {
+                            Icon(
+                                imageVector = if (showSafeWord) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (showSafeWord) "Hide safe word" else "Show safe word"
+                            )
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("safe_word_input")
+                )
+                Spacer(Modifier.height(6.dp))
+                Button(
+                    onClick = {
+                        onSaveSafeWord(safeWordDraft)
+                        if (safeWordDraft.trim().length >= 2) {
+                            safeWordDraft = ""
+                        }
+                    },
+                    enabled = safeWordDraft.trim().length >= 2,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("save_safe_word_btn")
+                ) {
+                    Text("Save Safe Word")
+                }
+
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "Device Unlock Pattern (3x3 Grid): " + if (uiState.deviceUnlockPatternLength >= 4) {
+                        "Saved (${uiState.deviceUnlockPatternLength} dots)"
+                    } else {
+                        "Not set yet"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (uiState.deviceUnlockPatternLength >= 4) ProfitEmerald else WarningAmber
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "Swipe or tap at least 4 dots in order (Draft: ${
+                        if (draftPattern.isEmpty()) "none" else draftPattern.joinToString(" -> ")
+                    }):",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = jc.mutedSlate
+                )
+                Spacer(Modifier.height(8.dp))
+                PatternLockInputGrid(
+                    selectedDots = draftPattern,
+                    onStrokeStart = { firstDot ->
+                        draftPattern.clear()
+                        draftPattern.add(firstDot)
+                    },
+                    onStrokeAddDot = { dot ->
+                        if (dot !in draftPattern) {
+                            val last = draftPattern.lastOrNull()
+                            if (last != null) {
+                                intermediatePatternDot(last, dot)?.let { mid ->
+                                    if (mid !in draftPattern) draftPattern.add(mid)
+                                }
+                            }
+                            draftPattern.add(dot)
+                        }
+                    },
+                    onTapDot = { dot ->
+                        if (dot !in draftPattern) {
+                            val last = draftPattern.lastOrNull()
+                            if (last != null) {
+                                intermediatePatternDot(last, dot)?.let { mid ->
+                                    if (mid !in draftPattern) draftPattern.add(mid)
+                                }
+                            }
+                            draftPattern.add(dot)
+                        }
+                    },
+                    modifier = Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .testTag("pattern_lock_grid")
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { draftPattern.clear() },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("clear_pattern_draft_btn")
+                    ) {
+                        Text("Clear Grid")
+                    }
+                    Button(
+                        onClick = {
+                            onSaveUnlockPattern(draftPattern.toList())
+                            draftPattern.clear()
+                        },
+                        enabled = draftPattern.size >= 4,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("save_unlock_pattern_btn")
+                    ) {
+                        Text("Save Pattern")
+                    }
+                }
+                if (uiState.hasDeviceSafeWord || uiState.deviceUnlockPatternLength > 0) {
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(
+                        onClick = {
+                            draftPattern.clear()
+                            onClearUnlockCredentials()
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("wipe_unlock_credentials_btn")
+                    ) {
+                        Text("Clear Saved Safe Word & Pattern")
                     }
                 }
             }
@@ -681,4 +887,150 @@ private fun PermissionHealthRow(
         }
     }
     Spacer(Modifier.height(6.dp))
+}
+
+@Composable
+private fun PatternLockInputGrid(
+    selectedDots: List<Int>,
+    onStrokeStart: (Int) -> Unit,
+    onStrokeAddDot: (Int) -> Unit,
+    onTapDot: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var boxSize by remember { mutableStateOf(IntSize.Zero) }
+    var activeDragPos by remember { mutableStateOf<Offset?>(null) }
+
+    fun dotCenter(dot: Int, size: IntSize): Offset {
+        val idx = dot - 1
+        val col = idx % 3
+        val row = idx / 3
+        return Offset(
+            x = (col + 0.5f) * (size.width / 3f),
+            y = (row + 0.5f) * (size.height / 3f)
+        )
+    }
+
+    fun hitTestDot(pos: Offset, size: IntSize): Int? {
+        if (size.width <= 0 || size.height <= 0) return null
+        val hitRadius = minOf(size.width, size.height) / 7.5f
+        for (dot in 1..9) {
+            val c = dotCenter(dot, size)
+            if (hypot((pos.x - c.x).toDouble(), (pos.y - c.y).toDouble()) <= hitRadius) {
+                return dot
+            }
+        }
+        return null
+    }
+
+    Box(
+        modifier = modifier
+            .size(216.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color(0x66081229))
+            .border(1.dp, ArcCyan.copy(alpha = 0.4f), RoundedCornerShape(18.dp))
+            .onSizeChanged { boxSize = it }
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val initialHit = hitTestDot(down.position, boxSize)
+                    var movedAcrossMultiple = false
+                    var lastDragDot = initialHit
+                    var strokeStarted = false
+                    activeDragPos = down.position
+
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull() ?: break
+                        if (!change.pressed) {
+                            activeDragPos = null
+                            if (!movedAcrossMultiple && initialHit != null) {
+                                onTapDot(initialHit)
+                            }
+                            break
+                        }
+                        activeDragPos = change.position
+                        val hit = hitTestDot(change.position, boxSize)
+                        val distanceFromStart = hypot(
+                            (change.position.x - down.position.x).toDouble(),
+                            (change.position.y - down.position.y).toDouble()
+                        )
+                        if (distanceFromStart > 14.0) {
+                            movedAcrossMultiple = true
+                            if (!strokeStarted && initialHit != null) {
+                                strokeStarted = true
+                                onStrokeStart(initialHit)
+                            }
+                        }
+                        if (movedAcrossMultiple && hit != null && hit != lastDragDot) {
+                            if (!strokeStarted) {
+                                strokeStarted = true
+                                onStrokeStart(hit)
+                            } else {
+                                onStrokeAddDot(hit)
+                            }
+                            lastDragDot = hit
+                        }
+                        change.consume()
+                    }
+                }
+            }
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val canvasSize = IntSize(size.width.toInt(), size.height.toInt())
+            val strokeColor = ArcCyan.copy(alpha = 0.85f)
+            if (selectedDots.size >= 2) {
+                for (i in 0 until selectedDots.lastIndex) {
+                    drawLine(
+                        color = strokeColor,
+                        start = dotCenter(selectedDots[i], canvasSize),
+                        end = dotCenter(selectedDots[i + 1], canvasSize),
+                        strokeWidth = 7f,
+                        cap = StrokeCap.Round
+                    )
+                }
+            }
+            val dragPos = activeDragPos
+            val lastDot = selectedDots.lastOrNull()
+            if (dragPos != null && lastDot != null) {
+                drawLine(
+                    color = ElectricBlue.copy(alpha = 0.55f),
+                    start = dotCenter(lastDot, canvasSize),
+                    end = dragPos,
+                    strokeWidth = 5f,
+                    cap = StrokeCap.Round
+                )
+            }
+
+            for (dot in 1..9) {
+                val center = dotCenter(dot, canvasSize)
+                val isSelected = dot in selectedDots
+                drawCircle(
+                    color = if (isSelected) ArcCyan.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.08f),
+                    radius = if (isSelected) 24f else 18f,
+                    center = center
+                )
+                drawCircle(
+                    color = if (isSelected) ProfitEmerald else ArcCyan.copy(alpha = 0.65f),
+                    radius = if (isSelected) 11f else 7f,
+                    center = center
+                )
+            }
+        }
+    }
+}
+
+private fun intermediatePatternDot(a: Int, b: Int): Int? {
+    val ra = (a - 1) / 3
+    val ca = (a - 1) % 3
+    val rb = (b - 1) / 3
+    val cb = (b - 1) % 3
+    val dRow = rb - ra
+    val dCol = cb - ca
+    return if (dRow % 2 == 0 && dCol % 2 == 0) {
+        val midRow = (ra + rb) / 2
+        val midCol = (ca + cb) / 2
+        midRow * 3 + midCol + 1
+    } else {
+        null
+    }
 }

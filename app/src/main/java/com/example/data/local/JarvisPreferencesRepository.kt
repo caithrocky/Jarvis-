@@ -53,7 +53,9 @@ data class JarvisUserSettings(
     val autoLearnDeviceDaily: Boolean = true,
     val futuristicHudMode: Boolean = true,
     val lastDailyLearnMs: Long = 0L,
-    val orbInactivityTimeoutSeconds: Int = 45
+    val orbInactivityTimeoutSeconds: Int = 45,
+    val keepScreenAwakeWhileActive: Boolean = true,
+    val deviceUnlockEnabled: Boolean = false
 ) {
     val operatingMode: TradingOperatingMode
         get() = when {
@@ -105,6 +107,8 @@ class JarvisPreferencesRepository(private val context: Context) {
         val FUTURISTIC_HUD_MODE = booleanPreferencesKey("futuristic_hud_mode")
         val LAST_DAILY_LEARN_MS = longPreferencesKey("last_daily_learn_ms")
         val ORB_INACTIVITY_SECONDS = intPreferencesKey("orb_inactivity_seconds")
+        val KEEP_SCREEN_AWAKE = booleanPreferencesKey("keep_screen_awake_while_active")
+        val DEVICE_UNLOCK_ENABLED = booleanPreferencesKey("device_unlock_enabled")
     }
 
     val settingsFlow: Flow<JarvisUserSettings> = context.jarvisDataStore.data.map { prefs ->
@@ -176,7 +180,9 @@ class JarvisPreferencesRepository(private val context: Context) {
             autoLearnDeviceDaily = prefs[Keys.AUTO_LEARN_DAILY] ?: true,
             futuristicHudMode = prefs[Keys.FUTURISTIC_HUD_MODE] ?: true,
             lastDailyLearnMs = prefs[Keys.LAST_DAILY_LEARN_MS] ?: 0L,
-            orbInactivityTimeoutSeconds = (prefs[Keys.ORB_INACTIVITY_SECONDS] ?: 45).coerceIn(15, 300)
+            orbInactivityTimeoutSeconds = (prefs[Keys.ORB_INACTIVITY_SECONDS] ?: 45).coerceIn(15, 300),
+            keepScreenAwakeWhileActive = prefs[Keys.KEEP_SCREEN_AWAKE] ?: true,
+            deviceUnlockEnabled = prefs[Keys.DEVICE_UNLOCK_ENABLED] ?: false
         )
     }
 
@@ -391,5 +397,13 @@ class JarvisPreferencesRepository(private val context: Context) {
 
     suspend fun setOrbInactivityTimeoutSeconds(seconds: Int) {
         context.jarvisDataStore.edit { it[Keys.ORB_INACTIVITY_SECONDS] = seconds.coerceIn(15, 300) }
+    }
+
+    suspend fun setKeepScreenAwakeWhileActive(enabled: Boolean) {
+        context.jarvisDataStore.edit { it[Keys.KEEP_SCREEN_AWAKE] = enabled }
+    }
+
+    suspend fun setDeviceUnlockEnabled(enabled: Boolean) {
+        context.jarvisDataStore.edit { it[Keys.DEVICE_UNLOCK_ENABLED] = enabled }
     }
 }

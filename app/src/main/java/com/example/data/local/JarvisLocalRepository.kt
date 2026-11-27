@@ -12,6 +12,7 @@ class JarvisLocalRepository(private val db: JarvisDatabase) {
     val learnedApps: Flow<List<DeviceAppKnowledgeEntity>> = db.deviceKnowledgeDao().observeLearnedApps()
     val learnedWorkflows: Flow<List<LearnedWorkflowEntity>> = db.deviceKnowledgeDao().observeWorkflows()
     val ownerHabits: Flow<List<OwnerHabitEntity>> = db.deviceKnowledgeDao().observeOwnerHabits()
+    val scheduledAutomations: Flow<List<ScheduledAutomationEntity>> = db.scheduledAutomationDao().observeAutomations()
 
     suspend fun getRecentMessages(limit: Int = 16): List<ConversationMessageEntity> =
         db.conversationDao().getRecentMessages(limit).reversed()
@@ -126,4 +127,27 @@ class JarvisLocalRepository(private val db: JarvisDatabase) {
         db.deviceKnowledgeDao().clearWorkflows()
         db.deviceKnowledgeDao().clearHabits()
     }
+
+    suspend fun getActiveScheduledAutomations(): List<ScheduledAutomationEntity> =
+        db.scheduledAutomationDao().getActiveAutomationsSnapshot()
+
+    suspend fun getScheduledAutomationById(id: Long): ScheduledAutomationEntity? =
+        db.scheduledAutomationDao().getById(id)
+
+    suspend fun upsertScheduledAutomation(task: ScheduledAutomationEntity): Long =
+        db.scheduledAutomationDao().upsertAutomation(task)
+
+    suspend fun setScheduledAutomationEnabled(id: Long, enabled: Boolean) =
+        db.scheduledAutomationDao().setEnabled(id, enabled)
+
+    suspend fun recordScheduledAutomationRun(
+        id: Long,
+        nextTriggerMs: Long,
+        enabled: Boolean,
+        runAtMs: Long,
+        outcome: String
+    ) = db.scheduledAutomationDao().recordExecution(id, nextTriggerMs, enabled, runAtMs, outcome)
+
+    suspend fun deleteScheduledAutomation(id: Long) =
+        db.scheduledAutomationDao().deleteAutomation(id)
 }

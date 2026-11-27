@@ -3,6 +3,7 @@ package com.example.assistant
 import android.Manifest
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.app.KeyguardManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -12,6 +13,7 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.text.InputType
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -22,12 +24,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.Locale
+import kotlin.coroutines.resume
 
 data class ScreenActionResult(
     val success: Boolean,
@@ -167,6 +172,43 @@ class JarvisAccessibilityService : AccessibilityService() {
                 ?.root
         }.getOrNull()
         return appWindowRoot ?: currentRoot
+    }
+
+    private fun allInteractiveRoots(
+        includeInputMethod: Boolean = false,
+        includeSystem: Boolean = false
+    ): List<AccessibilityNodeInfo> {
+        val roots = mutableListOf<AccessibilityNodeInfo>()
+        runCatching {
+            windows
+                ?.sortedByDescending { it.layer }
+                ?.forEach { win ->
+                    val root = win.root ?: return@forEach
+                    val pkg = root.packageName?.toString().orEmpty()
+                    if (pkg == packageName) return@forEach
+                    val allowedType = when (win.type) {
+                        AccessibilityWindowInfo.TYPE_APPLICATION -> true
+                        AccessibilityWindowInfo.TYPE_INPUT_METHOD -> includeInputMethod
+                        AccessibilityWindowInfo.TYPE_SYSTEM -> includeSystem
+                        AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY -> false
+                        else -> false
+                    }
+                    if (allowedType) roots.add(root)
+                }
+        }
+        if (roots.isEmpty()) {
+            activeAppRootWindow()?.let { roots.add(it) }
+        }
+        return roots
+    }
+
+    private fun inputMethodWindowRoot(): AccessibilityNodeInfo? {
+        return runCatching {
+            windows
+                ?.filter { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+                ?.maxByOrNull { it.layer }
+                ?.root
+        }.getOrNull()
     }
 
     fun activeForegroundPackage(): String? =
@@ -1045,39 +1087,147 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     fun clickNodeByText(targetText: String): ScreenActionResult {
-        val root = activeAppRootWindow()
-            ?: return ScreenActionResult(false, "I cannot read the active screen right now, Sir.")
+        val roots = allInteractiveRoots(includeInputMethod = true, includeSystem = true)
+        if (roots.isEmpty()) {
+            return ScreenActionResult(false, "I cannot read the active screen right now, Sir.")
+        }
         val clean = targetText.trim()
-        if (clean.isBlank()) return ScreenActionResult(false, "Tell me which button or item to tap, Sir.")
+        if (clean.isBlank()) return ScreenActionResult(false, "Tell me which button, tab, or key to tap, Sir.")
 
-        val candidates = mutableListOf<AccessibilityNodeInfo>()
-        candidates.addAll(root.findAccessibilityNodeInfosByText(clean).orEmpty())
-        val lower = clean.lowercase(Locale.US)
-        traverseNodes(root) { node ->
-            val t = node.text?.toString()?.lowercase(Locale.US).orEmpty()
-            val d = node.contentDescription?.toString()?.lowercase(Locale.US).orEmpty()
-            if ((t.contains(lower) || d.contains(lower)) && node.isVisibleToUser) {
-                candidates.add(node)
+        val strippedVariant = clean
+            .replace(Regex("\\s+(?:button|tab|key)$", RegexOption.IGNORE_CASE), "")
+            .trim()
+        val queries = listOf(clean, strippedVariant).filter { it.isNotBlank() }.distinct()
+
+        data class ScoredCandidate(val score: Int, val node: AccessibilityNodeInfo)
+        val scored = mutableListOf<ScoredCandidate>()
+
+        for (root in roots) {
+            traverseNodes(root) { node ->
+                if (!node.isVisibleToUser) return@traverseNodes
+                val rawText = if (node.isPassword) "" else node.text?.toString()?.trim().orEmpty()
+                val desc = node.contentDescription?.toString()?.trim().orEmpty()
+                val hint = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    node.hintText?.toString()?.trim().orEmpty()
+                } else ""
+                val resName = node.viewIdResourceName?.substringAfterLast("/")?.replace('_', ' ')?.trim().orEmpty()
+
+                val fields = listOf(rawText, desc, hint, resName).filter { it.isNotBlank() }
+                if (fields.isEmpty()) return@traverseNodes
+
+                var bestMatchScore = Int.MAX_VALUE
+                for (q in queries) {
+                    val ql = q.lowercase(Locale.US)
+                    for ((idx, f) in fields.withIndex()) {
+                        val fl = f.lowercase(Locale.US)
+                        val basePenalty = if (idx == 3) 4 else 0 // prefer visible text/desc over internal resource IDs
+                        val s = when {
+                            fl == ql -> 0 + basePenalty
+                            fl.startsWith(ql) -> 1 + basePenalty
+                            Regex("\\b${Regex.escape(ql)}\\b").containsMatchIn(fl) -> 2 + basePenalty
+                            fl.contains(ql) -> 3 + basePenalty
+                            else -> Int.MAX_VALUE
+                        }
+                        if (s < bestMatchScore) bestMatchScore = s
+                    }
+                }
+                if (bestMatchScore != Int.MAX_VALUE) {
+                    val hasClickable = node.isClickable || findClickableAncestorBounds(node, maxDepth = 5) != null
+                    val clickPenalty = if (hasClickable) 0 else 10
+                    scored.add(ScoredCandidate(bestMatchScore + clickPenalty, node))
+                }
             }
         }
 
-        for (candidate in candidates) {
+        val ordered = scored.sortedBy { it.score }
+        for (entry in ordered) {
+            val candidate = entry.node
             var current: AccessibilityNodeInfo? = candidate
             var depth = 0
             while (current != null && depth < 5) {
                 if (current.isClickable) {
                     val rect = Rect().also { current.getBoundsInScreen(it) }
-                    overlayManager?.showHighlightBoxes(listOf(HighlightTarget(rect, label = clean)), 1500L)
-                    overlayManager?.showTapRipple(rect.centerX().toFloat(), rect.centerY().toFloat(), clean)
-                    if (current.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                        return ScreenActionResult(true, "Tapped \"$clean\", Sir.", rect)
+                    if (rect.width() > 4 && rect.height() > 4) {
+                        overlayManager?.showHighlightBoxes(listOf(HighlightTarget(rect, label = clean)), 1500L)
+                        overlayManager?.showTapRipple(rect.centerX().toFloat(), rect.centerY().toFloat(), clean)
+                        if (current.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                            return ScreenActionResult(true, "Tapped \"$clean\", Sir.", rect)
+                        }
+                        // Fallback to gesture tap inside clickable bounds (handles custom Compose/Tab views)
+                        return tapBoundsCenter(rect, clean)
                     }
                 }
                 current = current.parent
                 depth++
             }
+            // Fallback for Compose tabs or custom views where node isn't flagged isClickable
+            val bounds = Rect().also { candidate.getBoundsInScreen(it) }
+            if (bounds.width() > 6 && bounds.height() > 6) {
+                return tapBoundsCenter(bounds, clean)
+            }
         }
-        return ScreenActionResult(false, "I could not find a clickable \"$clean\" control on this screen, Sir.")
+        return ScreenActionResult(false, "I could not find \"$clean\" on this screen, Sir.")
+    }
+
+    fun pressKeyboardKey(keyQuery: String): ScreenActionResult {
+        val clean = keyQuery.trim()
+        val lower = clean.lowercase(Locale.US)
+        if (lower.isBlank()) return ScreenActionResult(false, "Tell me which key to press, Sir.")
+
+        val isImeActionKey = lower in setOf("enter", "return", "go", "search", "send", "next", "done", "submit")
+        val imeRoot = inputMethodWindowRoot()
+
+        val aliases: List<String> = when (lower) {
+            "enter", "return" -> listOf("enter", "done", "go", "search", "send", "next", "return")
+            "backspace", "delete", "del", "erase" -> listOf("delete", "backspace", "del", "erase")
+            "space", "spacebar", "space bar" -> listOf("space", "spacebar", "english")
+            "shift", "caps", "caps lock" -> listOf("shift", "caps")
+            else -> listOf(lower)
+        }
+
+        if (imeRoot != null) {
+            var matchedNode: AccessibilityNodeInfo? = null
+            var bestScore = Int.MAX_VALUE
+            traverseNodes(imeRoot) { node ->
+                if (!node.isVisibleToUser) return@traverseNodes
+                val sig = nodeSignature(node)
+                val t = node.text?.toString()?.trim()?.lowercase(Locale.US).orEmpty()
+                val d = node.contentDescription?.toString()?.trim()?.lowercase(Locale.US).orEmpty()
+                aliases.forEachIndexed { idx, alias ->
+                    val score = when {
+                        t == alias || d == alias -> idx * 10
+                        t.startsWith(alias) || d.startsWith(alias) -> idx * 10 + 2
+                        sig.contains(alias) -> idx * 10 + 5
+                        else -> Int.MAX_VALUE
+                    }
+                    if (score < bestScore) {
+                        val rect = Rect().also { node.getBoundsInScreen(it) }
+                        if (rect.width() > 4 && rect.height() > 4) {
+                            bestScore = score
+                            matchedNode = node
+                        }
+                    }
+                }
+            }
+            val found = matchedNode
+            if (found != null) {
+                val rect = Rect().also { found.getBoundsInScreen(it) }
+                return tapBoundsCenter(rect, "$clean key")
+            }
+        }
+
+        if (isImeActionKey && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val appRoot = activeAppRootWindow()
+            val focused = appRoot?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (focused != null && focused.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)) {
+                return ScreenActionResult(true, "Pressed $clean, Sir.")
+            }
+        }
+
+        if (imeRoot == null) {
+            return ScreenActionResult(false, "No on-screen keyboard is currently open to press \"$clean\", Sir.")
+        }
+        return ScreenActionResult(false, "I couldn't find the \"$clean\" key on the visible keyboard, Sir.")
     }
 
     fun scrollScreen(forward: Boolean): ScreenActionResult {
@@ -1220,6 +1370,206 @@ class JarvisAccessibilityService : AccessibilityService() {
             ScreenActionResult(true, "$label, Sir.")
         } else {
             ScreenActionResult(false, "Android blocked the $actionName action on this screen, Sir.")
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    fun wakeScreenBriefly(timeoutMs: Long = 15_000L) {
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+        runCatching {
+            val wakeLock = pm.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                    PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                    PowerManager.ON_AFTER_RELEASE,
+                "JarvisAI::WakeScreenUnlock"
+            )
+            wakeLock.acquire(timeoutMs)
+        }
+    }
+
+    suspend fun performPowerAction(action: String): ScreenActionResult {
+        val normalized = action.lowercase(Locale.US).trim()
+        if (normalized == "sleep" || normalized == "lock" || normalized == "lock_screen" || normalized == "screen_off") {
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val ok = performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
+                if (ok) {
+                    ScreenActionResult(true, "Putting your device to sleep now, Sir.")
+                } else {
+                    ScreenActionResult(false, "Android blocked locking the screen from here, Sir.")
+                }
+            } else {
+                ScreenActionResult(false, "Locking/sleeping the screen programmatically requires Android 9 or higher, Sir.")
+            }
+        }
+
+        val isRestart = normalized == "restart" || normalized == "reboot"
+        val isShutdown = normalized == "shutdown" || normalized == "power_off" || normalized == "shut_down"
+        if (!isRestart && !isShutdown) {
+            return ScreenActionResult(false, "Unknown power command: $action")
+        }
+
+        val menuOpened = performGlobalAction(GLOBAL_ACTION_POWER_DIALOG)
+        if (!menuOpened) {
+            return ScreenActionResult(false, "Android blocked opening the Power Menu on this screen, Sir.")
+        }
+
+        delay(800L)
+        val keywords = if (isRestart) {
+            listOf("restart", "reboot")
+        } else {
+            listOf("power off", "shut down", "shutdown", "turn off")
+        }
+        val actionLabel = if (isRestart) "Restart" else "Power off"
+        val firstTap = findAndClickSystemDialogButton(keywords)
+        if (firstTap) {
+            delay(450L)
+            // Some OEMs (Transsion/Samsung/Pixel) show a second confirmation button after tapping Power off/Restart
+            findAndClickSystemDialogButton(keywords)
+            return ScreenActionResult(
+                true,
+                "Opened the power menu and selected $actionLabel, Sir — confirm on screen if your device prompts once more."
+            )
+        }
+
+        return ScreenActionResult(
+            true,
+            "I opened Android's Power Menu, Sir — tap $actionLabel on screen since Android doesn't allow apps to trigger silent kernel $normalized without tapping."
+        )
+    }
+
+    private fun findAndClickSystemDialogButton(keywords: List<String>): Boolean {
+        val roots = allInteractiveRoots(includeInputMethod = false, includeSystem = true)
+        for (root in roots) {
+            val match = findClickableNodeByKeywords(root, keywords)
+            if (match != null) {
+                val rect = findClickableAncestorBounds(match) ?: Rect().also { match.getBoundsInScreen(it) }
+                if (rect.width() > 6 && rect.height() > 6) {
+                    val res = tapBoundsCenter(rect, keywords.first())
+                    if (res.success) return true
+                }
+            }
+        }
+        return false
+    }
+
+    suspend fun performPatternUnlock(patternDots: List<Int>): ScreenActionResult {
+        if (patternDots.size < 4 || patternDots.any { it !in 1..9 }) {
+            return ScreenActionResult(false, "Saved unlock pattern is invalid (needs at least 4 dots), Sir.")
+        }
+
+        wakeScreenBriefly(16_000L)
+        val km = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+            ?: return ScreenActionResult(false, "Cannot access system lock state on this device, Sir.")
+
+        if (!km.isKeyguardLocked) {
+            return ScreenActionResult(true, "Your device is already unlocked, Sir.")
+        }
+
+        // Check if pattern grid is already visible; otherwise swipe up to reveal keyguard bouncer
+        if (findLockPatternBoundsInWindows() == null) {
+            val dm = resources.displayMetrics
+            val cx = dm.widthPixels * 0.50f
+            val swipePath = Path().apply {
+                moveTo(cx, dm.heightPixels * 0.84f)
+                lineTo(cx, dm.heightPixels * 0.24f)
+            }
+            dispatchGestureSuspend(GestureDescription.StrokeDescription(swipePath, 0L, 260L))
+            delay(700L)
+            if (!km.isKeyguardLocked) {
+                return ScreenActionResult(true, "Device unlocked, Sir.")
+            }
+        }
+
+        val gridBounds = findLockPatternBoundsInWindows() ?: estimateStandardPatternGridBounds()
+        val cellWidth = gridBounds.width() / 3f
+        val cellHeight = gridBounds.height() / 3f
+
+        fun centerForDot(dot: Int): Pair<Float, Float> {
+            val idx = dot - 1
+            val col = idx % 3
+            val row = idx / 3
+            val x = (gridBounds.left + (col + 0.5f) * cellWidth).coerceAtLeast(1f)
+            val y = (gridBounds.top + (row + 0.5f) * cellHeight).coerceAtLeast(1f)
+            return x to y
+        }
+
+        val path = Path()
+        val firstPoint = centerForDot(patternDots.first())
+        path.moveTo(firstPoint.first, firstPoint.second)
+        for (i in 1 until patternDots.size) {
+            val pt = centerForDot(patternDots[i])
+            path.lineTo(pt.first, pt.second)
+        }
+
+        val durationMs = (patternDots.size * 155L).coerceIn(550L, 1400L)
+        val dispatched = dispatchGestureSuspend(GestureDescription.StrokeDescription(path, 0L, durationMs))
+        if (!dispatched) {
+            return ScreenActionResult(
+                false,
+                "Android rejected the unlock gesture on the secure lock screen, Sir."
+            )
+        }
+
+        delay(800L)
+        return if (!km.isKeyguardLocked) {
+            ScreenActionResult(true, "Device unlocked, Sir. Welcome back.")
+        } else {
+            ScreenActionResult(
+                false,
+                "I drew your pattern across the lock grid, Sir, but Android still reports the screen locked (either your device hides lock-screen pattern coordinates from accessibility services or it requires manual entry)."
+            )
+        }
+    }
+
+    private fun findLockPatternBoundsInWindows(): Rect? {
+        val sysRoots = allInteractiveRoots(includeInputMethod = false, includeSystem = true)
+        val dm = resources.displayMetrics
+        for (root in sysRoots) {
+            var foundRect: Rect? = null
+            traverseNodes(root) { node ->
+                if (foundRect != null || !node.isVisibleToUser) return@traverseNodes
+                val resId = node.viewIdResourceName?.lowercase(Locale.US).orEmpty()
+                val cls = node.className?.toString()?.lowercase(Locale.US).orEmpty()
+                if (resId.contains("lockpattern") || resId.contains("lock_pattern") || cls.contains("lockpatternview")) {
+                    val r = Rect().also { node.getBoundsInScreen(it) }
+                    if (r.width() >= dm.widthPixels * 0.35f && r.height() >= dm.widthPixels * 0.35f) {
+                        foundRect = r
+                    }
+                }
+            }
+            if (foundRect != null) return foundRect
+        }
+        return null
+    }
+
+    private fun estimateStandardPatternGridBounds(): Rect {
+        val dm = resources.displayMetrics
+        val side = minOf(dm.widthPixels * 0.66f, dm.heightPixels * 0.34f).toInt()
+        val left = (dm.widthPixels - side) / 2
+        val centerY = (dm.heightPixels * 0.64f).toInt()
+        val top = (centerY - side / 2).coerceIn(0, (dm.heightPixels - side).coerceAtLeast(0))
+        return Rect(left, top, left + side, top + side)
+    }
+
+    private suspend fun dispatchGestureSuspend(stroke: GestureDescription.StrokeDescription): Boolean {
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        return suspendCancellableCoroutine { cont ->
+            val accepted = dispatchGesture(
+                gesture,
+                object : GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                        if (cont.isActive) cont.resume(true)
+                    }
+
+                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                        if (cont.isActive) cont.resume(false)
+                    }
+                },
+                null
+            )
+            if (!accepted && cont.isActive) {
+                cont.resume(false)
+            }
         }
     }
 

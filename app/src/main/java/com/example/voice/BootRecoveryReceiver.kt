@@ -8,14 +8,15 @@ import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import com.example.JarvisApplication
 import com.example.assistant.DeviceLearningEngine
+import com.example.assistant.ScheduledAutomationEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
- * Restores hands-free wake-word service & daily device learning cleanly after reboot or app update
- * whenever the user has enabled background listening and granted microphone permission.
+ * Restores hands-free wake-word service, scheduled automations, and daily device learning cleanly
+ * after reboot or app update whenever configured by Sir.
  */
 class BootRecoveryReceiver : BroadcastReceiver() {
 
@@ -34,6 +35,10 @@ class BootRecoveryReceiver : BroadcastReceiver() {
             try {
                 val app = context.applicationContext as? JarvisApplication
                 DeviceLearningEngine.scheduleDailyStudy(context.applicationContext)
+
+                app?.localRepository?.getActiveScheduledAutomations()?.forEach { task ->
+                    ScheduledAutomationEngine.scheduleAlarm(context.applicationContext, task)
+                }
 
                 val wakeEnabled = app?.preferencesRepository?.settingsFlow?.first()?.wakeWordEnabled == true
                 val hasMic = ContextCompat.checkSelfPermission(

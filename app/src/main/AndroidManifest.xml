@@ -20,8 +20,9 @@
     <!-- System Assistant Alarms & Timers -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
 
-    <!-- Translucent Floating Orb Overlay -->
+    <!-- Translucent Floating Orb Overlay & Always-On Sleep/Wake -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
@@ -150,6 +151,11 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <receiver
+            android:name=".assistant.ScheduledAutomationReceiver"
+            android:enabled="true"
+            android:exported="false" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

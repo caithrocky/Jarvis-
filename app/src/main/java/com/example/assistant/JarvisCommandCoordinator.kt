@@ -1,13 +1,16 @@
 package com.example.assistant
 
+import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.os.PowerManager
 import android.provider.Settings
 import com.example.MainActivity
 import com.example.data.local.JarvisLocalRepository
 import com.example.data.local.JarvisPreferencesRepository
 import com.example.data.local.JarvisUserSettings
+import com.example.data.local.ScheduledAutomationEntity
 import com.example.data.remote.JarvisAiResult
 import com.example.data.remote.NewsAndResearchEngine
 import com.example.data.remote.NvidiaNimClient
@@ -33,6 +36,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import java.util.Calendar
 import java.util.Locale
 
 private enum class MessageStage {
@@ -49,6 +53,11 @@ private data class PendingMessageSession(
     val stage: MessageStage,
     val candidates: List<ContactCandidateMatch> = emptyList(),
     val createdAtMs: Long = System.currentTimeMillis()
+)
+
+private data class PendingUnlockSession(
+    val createdAtMs: Long = System.currentTimeMillis(),
+    val attemptsRemaining: Int = 3
 )
 
 private data class DirectCommandOutcome(
@@ -92,12 +101,18 @@ class JarvisCommandCoordinator(
     private var pendingMessageSession: PendingMessageSession? = null
 
     @Volatile
+    private var pendingUnlockSession: PendingUnlockSession? = null
+
+    @Volatile
     private var abortRequested: Boolean = false
 
     private var taskResetJob: Job? = null
 
     private val _isProcessing = MutableStateFlow(false)
     val isProcessing: StateFlow<Boolean> = _isProcessing.asStateFlow()
+
+    private val _suppressScreenAwakeTemporarily = MutableStateFlow(false)
+    val suppressScreenAwakeTemporarily: StateFlow<Boolean> = _suppressScreenAwakeTemporarily.asStateFlow()
 
     private val _streamingReply = MutableStateFlow("")
     val streamingReply: StateFlow<String> = _streamingReply.asStateFlow()
@@ -107,6 +122,9 @@ class JarvisCommandCoordinator(
 
     private val _lastUserPrompt = MutableStateFlow("")
     val lastUserPrompt: StateFlow<String> = _lastUserPrompt.asStateFlow()
+
+    private val _aiHudHeadline = MutableStateFlow<String?>(null)
+    val aiHudHeadline: StateFlow<String?> = _aiHudHeadline.asStateFlow()
 
     private val _autonomousStepStatus = MutableStateFlow("")
     val autonomousStepStatus: StateFlow<String> = _autonomousStepStatus.asStateFlow()
@@ -132,6 +150,7 @@ class JarvisCommandCoordinator(
                 )
             }
         }
+        startScheduledAutomationWatcher()
     }
 
     fun onForegroundChanged(inForeground: Boolean) {
@@ -187,6 +206,7 @@ class JarvisCommandCoordinator(
     fun abortAllPendingActions() {
         abortRequested = true
         pendingMessageSession = null
+        pendingUnlockSession = null
         awaitingWebsiteLinkFor = null
         _pendingConfirmationSummary.value = null
         _autonomousStepStatus.value = ""
@@ -245,7 +265,7 @@ class JarvisCommandCoordinator(
         }
 
         val normalizedWrapUp = lower.replace(Regex("[!?.,]+$"), "").trim()
-        if (pendingMessageSession == null && awaitingWebsiteLinkFor == null && normalizedWrapUp in setOf(
+        if (pendingMessageSession == null && pendingUnlockSession == null && awaitingWebsiteLinkFor == null && normalizedWrapUp in setOf(
                 "that's all", "thats all", "that will be all", "nothing else",
                 "thank you jarvis", "thanks jarvis", "bye jarvis", "goodbye jarvis",
                 "stop listening", "go to standby", "you can sleep"
@@ -266,6 +286,7 @@ class JarvisCommandCoordinator(
 
         abortRequested = false
         _lastUserPrompt.value = prompt
+        _aiHudHeadline.value = JarvisHudIntelligence.summarizePromptAsHeadline(prompt).takeIf { it.isNotBlank() }
         updateTaskProgress(TaskStage.UNDERSTANDING, "Analyzing Request", prompt.take(48))
 
         scope.launch {
@@ -299,6 +320,27 @@ class JarvisCommandCoordinator(
                 }
             } else {
                 pendingMessageSession = null
+                if (pendingUnlockSession == null) {
+                    _pendingConfirmationSummary.value = null
+                }
+            }
+
+            // 0b. Active Safe Word Unlock verification session
+            val activeUnlockSession = pendingUnlockSession
+            if (activeUnlockSession != null && System.currentTimeMillis() - activeUnlockSession.createdAtMs < 90_000L) {
+                val unlockOutcome = handlePendingUnlockTurn(prompt, activeUnlockSession, currentSettings, fromVoice)
+                if (unlockOutcome != null) {
+                    updateTaskProgress(
+                        if (unlockOutcome.success) TaskStage.COMPLETED else TaskStage.FAILED,
+                        unlockOutcome.label,
+                        unlockOutcome.reply.take(64),
+                        autoClear = true
+                    )
+                    finishDirectReply(unlockOutcome.reply, unlockOutcome.label, currentSettings, fromVoice)
+                    return@launch
+                }
+            } else if (pendingUnlockSession != null) {
+                pendingUnlockSession = null
                 _pendingConfirmationSummary.value = null
             }
 
@@ -342,13 +384,40 @@ class JarvisCommandCoordinator(
             val screenSummary = svc?.readScreenSummary()
             val learnedContext = deviceLearningEngine.buildCompactKnowledgeContext()
 
-            val webResult = if (shouldLookupOnline(prompt)) {
+            val isOnline = OfflineAssistantEngine.isNetworkConnected(context)
+            val webResult = if (isOnline && shouldLookupOnline(prompt)) {
                 webClient.searchInternet(prompt)
             } else null
             val webContext = webResult?.formatForPrompt()?.takeIf { it.isNotBlank() }
 
             val history = localRepo.getRecentMessages(14)
             val memories = if (currentSettings.memoryEnabled) localRepo.getRecentMemories() else emptyList()
+
+            if (!isOnline) {
+                val (offlineReply, offlineTag) = OfflineAssistantEngine.answerOffline(
+                    context = context,
+                    prompt = prompt,
+                    memories = memories,
+                    learnedApps = localRepo.getAllDeviceAppsSnapshot(),
+                    learnedWorkflows = localRepo.getTopWorkflows(),
+                    screenSummary = screenSummary
+                )
+                localRepo.logAiActivity("OFFLINE_RESPONSE", "$offlineTag answered query offline")
+                _lastAssistantReply.value = offlineReply
+                localRepo.saveMessage(
+                    role = "assistant",
+                    content = offlineReply,
+                    modelUsed = "JARVIS On-Device Offline Engine",
+                    isVoice = fromVoice,
+                    toolSummary = offlineTag
+                )
+                _isProcessing.value = false
+                _streamingReply.value = ""
+                updateTaskProgress(TaskStage.COMPLETED, offlineTag, offlineReply.take(64), autoClear = true)
+                voiceEngine.onCommandHandlingFinished(expectFollowUp = fromVoice)
+                return@launch
+            }
+
             val snapshot = NvidiaNimClient.LiveContextSnapshot(
                 primaryActivity = currentSettings.primaryActivity,
                 activeScreenSummary = screenSummary,
@@ -404,7 +473,11 @@ class JarvisCommandCoordinator(
 
             when (result) {
                 is JarvisAiResult.Success -> {
-                    val (cleanedReply, parsedAiActions) = JarvisSystemAssistant.extractAndStripAiActions(result.replyText)
+                    val (hudStrippedReply, aiSelectedTitle) = JarvisSystemAssistant.extractHudTitleAndClean(result.replyText)
+                    if (!aiSelectedTitle.isNullOrBlank()) {
+                        _aiHudHeadline.value = aiSelectedTitle
+                    }
+                    val (cleanedReply, parsedAiActions) = JarvisSystemAssistant.extractAndStripAiActions(hudStrippedReply)
                     val actionsToRun = if (parsedAiActions.isNotEmpty()) {
                         parsedAiActions
                     } else {
@@ -530,6 +603,35 @@ class JarvisCommandCoordinator(
                                 }
                             }
                             SystemIntentKind.WEB_LOOKUP -> executedActionLabels.add("Internet Lookup")
+                            SystemIntentKind.DEVICE_POWER -> {
+                                val powerRes = handleDevicePowerAction(cmd.primaryArg)
+                                executedActionLabels.add(powerRes.label)
+                                actionNotes.add(powerRes.reply)
+                                if (!powerRes.success) taskFailed = true
+                            }
+                            SystemIntentKind.UNLOCK_DEVICE -> {
+                                val unlockRes = initiateDeviceUnlockFlow(currentSettings)
+                                executedActionLabels.add(unlockRes.label)
+                                actionNotes.add(unlockRes.reply)
+                                if (!unlockRes.success) taskFailed = true
+                            }
+                            SystemIntentKind.SCHEDULE_TASK -> {
+                                val schedRes = handleScheduleTask(cmd)
+                                executedActionLabels.add(schedRes.label)
+                                actionNotes.add(schedRes.reply)
+                                if (!schedRes.success) taskFailed = true
+                            }
+                            SystemIntentKind.LIST_AUTOMATIONS -> {
+                                val listRes = handleListAutomations()
+                                executedActionLabels.add(listRes.label)
+                                actionNotes.add(listRes.reply)
+                            }
+                            SystemIntentKind.CANCEL_AUTOMATION -> {
+                                val cancelRes = handleCancelAutomation(cmd.primaryArg)
+                                executedActionLabels.add(cancelRes.label)
+                                actionNotes.add(cancelRes.reply)
+                                if (!cancelRes.success) taskFailed = true
+                            }
                             else -> {
                                 if ((cmd.kind == SystemIntentKind.SIGNIN_ASSIST || cmd.kind == SystemIntentKind.SIGNUP_ASSIST) &&
                                     !verifyOwnerLockIfNeeded(currentSettings, fromVoice, "credential form filling")
@@ -628,13 +730,25 @@ class JarvisCommandCoordinator(
                 }
                 is JarvisAiResult.Error -> {
                     val onlineFallback = webResult?.formatForUserReply().orEmpty()
-                    replyText = if (onlineFallback.isNotBlank()) {
-                        "I had trouble reaching NVIDIA NIM, Sir, so I pulled this straight from the web: $onlineFallback"
+                    if (onlineFallback.isNotBlank()) {
+                        replyText = "I had trouble reaching NVIDIA NIM, Sir, so I pulled this straight from the web: $onlineFallback"
+                        toolSummary = "Internet Fallback"
+                    } else if (!OfflineAssistantEngine.isNetworkConnected(context)) {
+                        val (offReply, offTag) = OfflineAssistantEngine.answerOffline(
+                            context = context,
+                            prompt = prompt,
+                            memories = memories,
+                            learnedApps = localRepo.getAllDeviceAppsSnapshot(),
+                            learnedWorkflows = localRepo.getTopWorkflows(),
+                            screenSummary = screenSummary
+                        )
+                        replyText = offReply
+                        toolSummary = offTag
                     } else {
                         taskFailed = true
-                        result.message
+                        replyText = result.message
+                        toolSummary = "NIM Error"
                     }
-                    toolSummary = if (onlineFallback.isNotBlank()) "Internet Fallback" else "NIM Error"
                 }
             }
 
@@ -1387,6 +1501,11 @@ class JarvisCommandCoordinator(
                         }
                     }
                 }
+                SystemIntentKind.DEVICE_POWER -> handleDevicePowerAction(parsed.primaryArg)
+                SystemIntentKind.UNLOCK_DEVICE -> initiateDeviceUnlockFlow(currentSettings)
+                SystemIntentKind.SCHEDULE_TASK -> handleScheduleTask(parsed)
+                SystemIntentKind.LIST_AUTOMATIONS -> handleListAutomations()
+                SystemIntentKind.CANCEL_AUTOMATION -> handleCancelAutomation(parsed.primaryArg)
                 else -> {
                     val svc = JarvisAccessibilityService.activeInstance()
                     val beforePkg = svc?.activeForegroundPackage().orEmpty()
@@ -1448,8 +1567,147 @@ class JarvisCommandCoordinator(
             return false
         }
         return Regex(
-            """\b(open|launch|start|send|text|message|dm|reply|call|dial|tap|click|press|scroll|swipe|type|write|search in|play|pause|stop|mute|unmute|turn on|turn off|enable|disable|install|download|sign me in|sign in|log in|create an account|fill my|check my notifications|read my notifications|go back|go home|take a selfie|take a photo)\b"""
+            """\b(open|launch|start|send|text|message|dm|reply|call|dial|tap|click|press|scroll|swipe|type|write|search in|play|pause|stop|mute|unmute|turn on|turn off|enable|disable|install|download|sign me in|sign in|log in|create an account|fill my|check my notifications|read my notifications|go back|go home|take a selfie|take a photo|unlock|shut down|shutdown|restart|reboot|sleep)\b"""
         ).containsMatchIn(lower)
+    }
+
+    @Suppress("DEPRECATION")
+    private suspend fun initiateDeviceUnlockFlow(settings: JarvisUserSettings): DirectCommandOutcome {
+        val svc = JarvisAccessibilityService.activeInstance()
+        svc?.wakeScreenBriefly(18_000L) ?: runCatching {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            pm?.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                    PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                    PowerManager.ON_AFTER_RELEASE,
+                "JarvisAI::UnlockWake"
+            )?.acquire(18_000L)
+        }
+
+        val km = context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        if (km != null && !km.isKeyguardLocked) {
+            return DirectCommandOutcome("Your device is already unlocked, Sir.", "Already Unlocked", true)
+        }
+        if (svc == null) {
+            return DirectCommandOutcome(
+                "Turn on JARVIS Screen Helper in Accessibility Settings first, Sir, so I can unlock the screen for you.",
+                "Screen Helper Needed",
+                false
+            )
+        }
+        if (!settings.deviceUnlockEnabled) {
+            return DirectCommandOutcome(
+                "Voice device unlock is turned off, Sir. Enable it and save your Safe Word and pattern in JARVIS Settings first.",
+                "Unlock Disabled",
+                false
+            )
+        }
+        if (!credentialStore.hasDeviceSafeWord() || !credentialStore.hasDeviceUnlockPattern()) {
+            return DirectCommandOutcome(
+                "Please set both your Safe Word and 3x3 unlock pattern inside JARVIS Settings first, Sir.",
+                "Unlock Setup Needed",
+                false
+            )
+        }
+
+        pendingUnlockSession = PendingUnlockSession()
+        _pendingConfirmationSummary.value = "Say your Safe Word to unlock device"
+        return DirectCommandOutcome(
+            "Waking the screen now, Sir. What is your safe word?",
+            "Safe Word Required",
+            true
+        )
+    }
+
+    private suspend fun handlePendingUnlockTurn(
+        prompt: String,
+        session: PendingUnlockSession,
+        settings: JarvisUserSettings,
+        fromVoice: Boolean
+    ): DirectCommandOutcome? {
+        val lower = prompt.lowercase(Locale.US).trim().replace(Regex("[!?.,]+$"), "")
+        if (lower in setOf("cancel", "stop", "never mind", "nevermind", "abort")) {
+            pendingUnlockSession = null
+            _pendingConfirmationSummary.value = null
+            return DirectCommandOutcome("Unlock cancelled, Sir.", "Unlock Cancelled", true)
+        }
+
+        if (!credentialStore.verifySafeWord(prompt)) {
+            val remaining = session.attemptsRemaining - 1
+            return if (remaining <= 0) {
+                pendingUnlockSession = null
+                _pendingConfirmationSummary.value = null
+                DirectCommandOutcome(
+                    "Safe word did not match after 3 attempts, Sir. Keeping your device locked.",
+                    "Safe Word Denied",
+                    false
+                )
+            } else {
+                pendingUnlockSession = session.copy(attemptsRemaining = remaining)
+                DirectCommandOutcome(
+                    "That safe word didn't match, Sir — $remaining attempt${if (remaining == 1) "" else "s"} left. Please repeat your safe word.",
+                    "Safe Word Retry",
+                    false
+                )
+            }
+        }
+
+        if (!verifyOwnerLockIfNeeded(settings, fromVoice, "unlocking the device")) {
+            pendingUnlockSession = null
+            _pendingConfirmationSummary.value = null
+            return DirectCommandOutcome(
+                "Safe word matched, Sir, but your enrolled Voiceprint did not verify under Voice Lock.",
+                "Voice Lock",
+                false
+            )
+        }
+
+        pendingUnlockSession = null
+        _pendingConfirmationSummary.value = null
+
+        val svc = JarvisAccessibilityService.activeInstance()
+            ?: return DirectCommandOutcome("Safe word confirmed, Sir, but Screen Helper is disconnected.", "Screen Helper Needed", false)
+        val dots = credentialStore.getDeviceUnlockPattern()
+        if (dots.size < 4) {
+            return DirectCommandOutcome("Safe word confirmed, Sir, but no valid pattern is saved in Settings.", "Pattern Needed", false)
+        }
+
+        val outcome = svc.performPatternUnlock(dots)
+        localRepo.logAiActivity("DEVICE_UNLOCK", if (outcome.success) "Unlocked device via Safe Word" else outcome.message)
+        return DirectCommandOutcome(
+            outcome.message,
+            if (outcome.success) "Device Unlocked" else "Unlock Check",
+            outcome.success
+        )
+    }
+
+    private suspend fun handleDevicePowerAction(mode: String): DirectCommandOutcome {
+        val svc = JarvisAccessibilityService.activeInstance()
+            ?: return DirectCommandOutcome(
+                "Turn on JARVIS Screen Helper in Settings first, Sir, so I can put the device to sleep or open the power menu.",
+                "Screen Helper Needed",
+                false
+            )
+
+        return if (mode.equals("sleep", ignoreCase = true)) {
+            _suppressScreenAwakeTemporarily.value = true
+            delay(220L)
+            val res = svc.performPowerAction("sleep")
+            scope.launch {
+                delay(6500L)
+                _suppressScreenAwakeTemporarily.value = false
+            }
+            localRepo.logAiActivity("DEVICE_POWER", res.message)
+            DirectCommandOutcome(res.message, "Device Sleep", res.success)
+        } else {
+            val res = svc.performPowerAction(mode)
+            localRepo.logAiActivity("DEVICE_POWER", res.message)
+            DirectCommandOutcome(
+                res.message,
+                if (mode.equals("restart", ignoreCase = true)) "Restart Menu" else "Shutdown Menu",
+                res.success
+            )
+        }
     }
 
     private fun shouldLookupOnline(prompt: String): Boolean {
@@ -1477,5 +1735,223 @@ class JarvisCommandCoordinator(
             lower.contains("how to") ||
             lower.contains("website") ||
             lower.contains("link")
+    }
+
+    private fun startScheduledAutomationWatcher() {
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                localRepo.getActiveScheduledAutomations().forEach { task ->
+                    ScheduledAutomationEngine.scheduleAlarm(context, task)
+                }
+            }
+            while (true) {
+                delay(15_000L)
+                runCatching {
+                    val now = System.currentTimeMillis()
+                    val active = localRepo.getActiveScheduledAutomations()
+                    active.filter { it.triggerAtMs <= now }.forEach { dueTask ->
+                        executeScheduledAutomationById(dueTask.id)
+                    }
+                }
+            }
+        }
+    }
+
+    suspend fun scheduleManualAutomation(
+        title: String,
+        commandPrompt: String,
+        triggerAtMs: Long,
+        repeatDaily: Boolean,
+        source: String = "AI"
+    ): ScheduledAutomationEntity {
+        val entity = ScheduledAutomationEntity(
+            title = title,
+            commandPrompt = commandPrompt,
+            triggerAtMs = triggerAtMs,
+            repeatDaily = repeatDaily,
+            isEnabled = true,
+            source = source
+        )
+        val newId = localRepo.upsertScheduledAutomation(entity)
+        val saved = entity.copy(id = newId)
+        ScheduledAutomationEngine.scheduleAlarm(context, saved)
+        localRepo.logAiActivity(
+            "AUTOMATION_QUEUED",
+            "${saved.title} for ${ScheduledAutomationEngine.formatScheduleTime(saved.triggerAtMs)}${if (repeatDaily) " (daily)" else ""}"
+        )
+        return saved
+    }
+
+    fun toggleScheduledAutomation(id: Long, enabled: Boolean) {
+        scope.launch(Dispatchers.IO) {
+            localRepo.setScheduledAutomationEnabled(id, enabled)
+            val task = localRepo.getScheduledAutomationById(id) ?: return@launch
+            if (enabled) {
+                val now = System.currentTimeMillis()
+                val adjustedTrigger = if (task.triggerAtMs <= now) now + 24 * 3_600_000L else task.triggerAtMs
+                val updated = task.copy(triggerAtMs = adjustedTrigger, isEnabled = true)
+                localRepo.upsertScheduledAutomation(updated)
+                ScheduledAutomationEngine.scheduleAlarm(context, updated)
+            } else {
+                ScheduledAutomationEngine.cancelAlarm(context, id)
+            }
+        }
+    }
+
+    fun deleteScheduledAutomation(id: Long) {
+        scope.launch(Dispatchers.IO) {
+            ScheduledAutomationEngine.cancelAlarm(context, id)
+            localRepo.deleteScheduledAutomation(id)
+        }
+    }
+
+    suspend fun executeScheduledAutomationById(taskId: Long) {
+        val task = localRepo.getScheduledAutomationById(taskId) ?: return
+        if (!task.isEnabled) return
+        val now = System.currentTimeMillis()
+        val nextTriggerMs = if (task.repeatDaily) {
+            var candidate = task.triggerAtMs + 24 * 3_600_000L
+            while (candidate <= now + 60_000L) {
+                candidate += 24 * 3_600_000L
+            }
+            candidate
+        } else {
+            task.triggerAtMs
+        }
+        val stayEnabled = task.repeatDaily
+        localRepo.recordScheduledAutomationRun(
+            id = task.id,
+            nextTriggerMs = nextTriggerMs,
+            enabled = stayEnabled,
+            runAtMs = now,
+            outcome = "Triggered"
+        )
+        if (stayEnabled) {
+            ScheduledAutomationEngine.scheduleAlarm(context, task.copy(triggerAtMs = nextTriggerMs, isEnabled = true))
+        } else {
+            ScheduledAutomationEngine.cancelAlarm(context, task.id)
+        }
+
+        localRepo.logAiActivity("AUTOMATION_RUN", "Running scheduled task: ${task.title}")
+        scope.launch {
+            _aiHudHeadline.value = task.title
+            submitQuery(task.commandPrompt, fromVoice = false)
+        }
+    }
+
+    fun triggerOrScheduleSuggestion(suggestion: FuturisticMissionSuggestion) {
+        if (!suggestion.isScheduleAction) {
+            _aiHudHeadline.value = suggestion.label
+            submitQuery(suggestion.commandPrompt, fromVoice = false)
+            return
+        }
+        scope.launch {
+            val now = System.currentTimeMillis()
+            val cal = Calendar.getInstance().apply {
+                timeInMillis = now
+                set(Calendar.HOUR_OF_DAY, suggestion.suggestedHour24)
+                set(Calendar.MINUTE, suggestion.suggestedMinute)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+                if (timeInMillis <= now) add(Calendar.DAY_OF_YEAR, 1)
+            }
+            val saved = scheduleManualAutomation(
+                title = suggestion.label,
+                commandPrompt = suggestion.commandPrompt,
+                triggerAtMs = cal.timeInMillis,
+                repeatDaily = suggestion.repeatDaily,
+                source = "AI"
+            )
+            _aiHudHeadline.value = "Queued: ${saved.title}"
+            val settings = prefsRepo.settingsFlow.first()
+            finishDirectReply(
+                "Scheduled \"${saved.title}\" for ${ScheduledAutomationEngine.formatScheduleTime(saved.triggerAtMs)}, Sir.",
+                "Automation Queued",
+                settings,
+                fromVoice = false,
+                followUpListen = false
+            )
+        }
+    }
+
+    private suspend fun handleScheduleTask(cmd: ParsedSystemCommand): DirectCommandOutcome {
+        val parts = cmd.primaryArg.split("|", limit = 3)
+        val triggerAtMs = parts.getOrNull(0)?.toLongOrNull() ?: (System.currentTimeMillis() + 10 * 60_000L)
+        val repeatDaily = parts.getOrNull(1)?.equals("true", ignoreCase = true) == true
+        val title = parts.getOrNull(2).orEmpty().ifBlank { "Timed Task" }
+        val commandPrompt = cmd.secondaryArg.ifBlank { title }
+
+        val saved = scheduleManualAutomation(
+            title = title,
+            commandPrompt = commandPrompt,
+            triggerAtMs = triggerAtMs,
+            repeatDaily = repeatDaily,
+            source = "USER"
+        )
+        _aiHudHeadline.value = "Scheduled: ${saved.title}"
+        val timeText = ScheduledAutomationEngine.formatScheduleTime(saved.triggerAtMs)
+        val countdown = ScheduledAutomationEngine.formatCountdown(saved.triggerAtMs)
+        val repeatTag = if (saved.repeatDaily) " every day" else ""
+        return DirectCommandOutcome(
+            "Done, Sir — scheduled \"${saved.title}\" for $timeText$repeatTag ($countdown).",
+            "Task Scheduled",
+            true
+        )
+    }
+
+    private suspend fun handleListAutomations(): DirectCommandOutcome {
+        val active = localRepo.getActiveScheduledAutomations()
+        if (active.isEmpty()) {
+            _aiHudHeadline.value = "No Queued Automations"
+            return DirectCommandOutcome(
+                "You don't have any scheduled automations right now, Sir. Tell me a time and task—for example, \"At 7:30 AM give me my daily briefing\"—and I'll queue it.",
+                "Automations Empty",
+                true
+            )
+        }
+        val summary = active.take(5).joinToString("; ") { task ->
+            val time = ScheduledAutomationEngine.formatScheduleTime(task.triggerAtMs)
+            val countdown = ScheduledAutomationEngine.formatCountdown(task.triggerAtMs)
+            val daily = if (task.repeatDaily) " (daily)" else ""
+            "${task.title} at $time$daily ($countdown)"
+        }
+        _aiHudHeadline.value = "${active.size} Automation${if (active.size == 1) "" else "s"} Active"
+        return DirectCommandOutcome(
+            "You have ${active.size} active automation${if (active.size == 1) "" else "s"}, Sir: $summary.",
+            "Automations",
+            true
+        )
+    }
+
+    private suspend fun handleCancelAutomation(query: String): DirectCommandOutcome {
+        val active = localRepo.getActiveScheduledAutomations()
+        if (active.isEmpty()) {
+            return DirectCommandOutcome("There are no active scheduled automations to cancel, Sir.", "No Automations", false)
+        }
+        val q = query.trim().lowercase(Locale.US)
+        if (q == "all" || q == "everything") {
+            active.forEach {
+                ScheduledAutomationEngine.cancelAlarm(context, it.id)
+                localRepo.deleteScheduledAutomation(it.id)
+            }
+            _aiHudHeadline.value = "Cleared Automations"
+            return DirectCommandOutcome("Cleared all ${active.size} scheduled automations, Sir.", "Automations Cleared", true)
+        }
+        val target = if (q.isBlank()) {
+            active.first()
+        } else {
+            active.firstOrNull {
+                it.title.lowercase(Locale.US).contains(q) ||
+                    it.commandPrompt.lowercase(Locale.US).contains(q) ||
+                    ScheduledAutomationEngine.formatScheduleTime(it.triggerAtMs).lowercase(Locale.US).contains(q)
+            }
+        }
+        if (target == null) {
+            return DirectCommandOutcome("I couldn't find a scheduled automation matching \"$query\", Sir.", "Not Found", false)
+        }
+        ScheduledAutomationEngine.cancelAlarm(context, target.id)
+        localRepo.deleteScheduledAutomation(target.id)
+        _aiHudHeadline.value = "Cancelled ${target.title}"
+        return DirectCommandOutcome("Cancelled your scheduled automation \"${target.title}\", Sir.", "Automation Cancelled", true)
     }
 }

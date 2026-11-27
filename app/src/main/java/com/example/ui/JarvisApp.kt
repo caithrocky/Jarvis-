@@ -130,6 +130,8 @@ fun JarvisApp(viewModel: JarvisViewModel) {
     val messages by viewModel.messages.collectAsStateWithLifecycle()
     val memories by viewModel.memories.collectAsStateWithLifecycle()
     val aiLogs by viewModel.aiLogs.collectAsStateWithLifecycle()
+    val scheduledAutomations by viewModel.scheduledAutomations.collectAsStateWithLifecycle()
+    val learnedApps by viewModel.learnedApps.collectAsStateWithLifecycle()
 
     var hasMicPermission by remember {
         mutableStateOf(
@@ -315,12 +317,19 @@ fun JarvisApp(viewModel: JarvisViewModel) {
                             HomeDashboardScreen(
                                 uiState = uiState,
                                 settings = settings,
+                                memories = memories,
+                                learnedApps = learnedApps,
+                                scheduledAutomations = scheduledAutomations,
                                 hasMicPermission = hasMicPermission,
                                 onRequestMicPermission = requestVoicePermissions,
                                 onOpenMenu = { scope.launch { drawerState.open() } },
                                 onOrbTap = { viewModel.onOrbTapped(hasMicPermission) },
                                 onNavigate = viewModel::navigateTo,
-                                onAbortAutonomous = viewModel::abortAutonomousTasks
+                                onAbortAutonomous = viewModel::abortAutonomousTasks,
+                                onCycleHudHeadline = viewModel::cycleHudHeadline,
+                                onTriggerSuggestion = viewModel::triggerOrScheduleSuggestion,
+                                onRunAutomationNow = viewModel::runAutomationNow,
+                                onDeleteAutomation = viewModel::deleteAutomation
                             )
                         } else {
                             Column(
@@ -409,7 +418,12 @@ fun JarvisApp(viewModel: JarvisViewModel) {
                                             onVerifyOwnerVoice = viewModel::verifyOwnerVoiceNow,
                                             onClearOwnerVoice = viewModel::clearOwnerVoice,
                                             onToggleAutoLearnDaily = viewModel::setAutoLearnDeviceDaily,
-                                            onStudyDeviceNow = viewModel::studyDeviceNow
+                                            onStudyDeviceNow = viewModel::studyDeviceNow,
+                                            onToggleKeepScreenAwake = viewModel::setKeepScreenAwakeWhileActive,
+                                            onToggleDeviceUnlockEnabled = viewModel::setDeviceUnlockEnabled,
+                                            onSaveSafeWord = viewModel::saveDeviceUnlockSafeWord,
+                                            onSaveUnlockPattern = viewModel::saveDeviceUnlockPattern,
+                                            onClearUnlockCredentials = viewModel::clearDeviceUnlockCredentials
                                         )
 
                                         JarvisSection.HOME -> Unit

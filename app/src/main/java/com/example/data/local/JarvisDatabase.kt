@@ -10,6 +10,8 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "conversation_messages")
@@ -141,6 +143,20 @@ data class OwnerHabitEntity(
     val summary: String,
     val confidenceScore: Float = 0.6f,
     val updatedMs: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "scheduled_automations")
+data class ScheduledAutomationEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val title: String,
+    val commandPrompt: String,
+    val triggerAtMs: Long,
+    val repeatDaily: Boolean = false,
+    val isEnabled: Boolean = true,
+    val lastRunAtMs: Long? = null,
+    val lastOutcome: String? = null,
+    val source: String = "USER", // "USER" or "AI"
+    val createdAtMs: Long = System.currentTimeMillis()
 )
 
 @Dao
@@ -318,6 +334,30 @@ interface DeviceKnowledgeDao {
     suspend fun clearHabits()
 }
 
+@Dao
+interface ScheduledAutomationDao {
+    @Query("SELECT * FROM scheduled_automations ORDER BY isEnabled DESC, triggerAtMs ASC")
+    fun observeAutomations(): Flow<List<ScheduledAutomationEntity>>
+
+    @Query("SELECT * FROM scheduled_automations WHERE isEnabled = 1 ORDER BY triggerAtMs ASC")
+    suspend fun getActiveAutomationsSnapshot(): List<ScheduledAutomationEntity>
+
+    @Query("SELECT * FROM scheduled_automations WHERE id = :id LIMIT 1")
+    suspend fun getById(id: Long): ScheduledAutomationEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAutomation(task: ScheduledAutomationEntity): Long
+
+    @Query("UPDATE scheduled_automations SET isEnabled = :enabled WHERE id = :id")
+    suspend fun setEnabled(id: Long, enabled: Boolean)
+
+    @Query("UPDATE scheduled_automations SET triggerAtMs = :nextTriggerMs, isEnabled = :enabled, lastRunAtMs = :runAtMs, lastOutcome = :outcome WHERE id = :id")
+    suspend fun recordExecution(id: Long, nextTriggerMs: Long, enabled: Boolean, runAtMs: Long, outcome: String)
+
+    @Query("DELETE FROM scheduled_automations WHERE id = :id")
+    suspend fun deleteAutomation(id: Long)
+}
+
 @Database(
     entities = [
         ConversationMessageEntity::class,
@@ -330,9 +370,10 @@ interface DeviceKnowledgeDao {
         CachedMarketQuoteEntity::class,
         DeviceAppKnowledgeEntity::class,
         LearnedWorkflowEntity::class,
-        OwnerHabitEntity::class
+        OwnerHabitEntity::class,
+        ScheduledAutomationEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class JarvisDatabase : RoomDatabase() {
@@ -344,10 +385,32 @@ abstract class JarvisDatabase : RoomDatabase() {
     abstract fun aiActivityDao(): AiActivityDao
     abstract fun marketCacheDao(): MarketCacheDao
     abstract fun deviceKnowledgeDao(): DeviceKnowledgeDao
+    abstract fun scheduledAutomationDao(): ScheduledAutomationDao
 
     companion object {
         @Volatile
         private var INSTANCE: JarvisDatabase? = null
+
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `scheduled_automations` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `commandPrompt` TEXT NOT NULL,
+                        `triggerAtMs` INTEGER NOT NULL,
+                        `repeatDaily` INTEGER NOT NULL,
+                        `isEnabled` INTEGER NOT NULL,
+                        `lastRunAtMs` INTEGER,
+                        `lastOutcome` TEXT,
+                        `source` TEXT NOT NULL,
+                        `createdAtMs` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
 
         fun getInstance(context: Context): JarvisDatabase {
             return INSTANCE ?: synchronized(this) {
@@ -356,6 +419,7 @@ abstract class JarvisDatabase : RoomDatabase() {
                     JarvisDatabase::class.java,
                     "jarvis_command_center.db"
                 )
+                    .addMigrations(MIGRATION_3_4)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }

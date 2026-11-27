@@ -75,7 +75,13 @@ enum class SystemIntentKind {
     INSTALL_APP,
     READ_NOTIFICATIONS,
     MEDIA_PLAY_SEARCH,
-    NEWS_RESEARCH
+    NEWS_RESEARCH,
+    PRESS_KEY,
+    DEVICE_POWER,
+    UNLOCK_DEVICE,
+    SCHEDULE_TASK,
+    LIST_AUTOMATIONS,
+    CANCEL_AUTOMATION
 }
 
 data class ParsedSystemCommand(
@@ -105,6 +111,18 @@ object JarvisSystemAssistant {
         "\\[\\s*ACTION\\s*:\\s*([A-Za-z_]+)(?:\\s*\\|\\s*([^\\]]*))?\\s*\\]",
         RegexOption.IGNORE_CASE
     )
+
+    private val hudTitleTagRegex = Regex(
+        "\\[\\s*HUD_TITLE\\s*:\\s*([^\\]]+)\\s*\\]",
+        RegexOption.IGNORE_CASE
+    )
+
+    fun extractHudTitleAndClean(rawReply: String): Pair<String, String?> {
+        val lastMatch = hudTitleTagRegex.findAll(rawReply).lastOrNull()
+        val hudTitle = lastMatch?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() }
+        val stripped = rawReply.replace(hudTitleTagRegex, "").replace(Regex("\\n{3,}"), "\n\n").trim()
+        return stripped to hudTitle
+    }
 
     private val deviceSettingKeywords = setOf(
         "wifi", "wi-fi", "bluetooth", "display", "brightness", "sound", "volume",
@@ -505,10 +523,85 @@ object JarvisSystemAssistant {
             return ParsedSystemCommand(SystemIntentKind.ENABLE_ALL_MODES)
         }
 
+        // 1b. Device Power & Lock/Unlock Voice Controls (checked before Orb sleep or generic Open App)
+        if (
+            lower == "make the device sleep" || lower == "make device sleep" ||
+            lower == "make phone sleep" || lower == "make the phone sleep" ||
+            lower == "put phone to sleep" || lower == "put the phone to sleep" ||
+            lower == "put device to sleep" || lower == "put the device to sleep" ||
+            lower == "sleep device" || lower == "sleep the device" ||
+            lower == "sleep phone" || lower == "sleep my phone" || lower == "sleep the phone" ||
+            lower == "turn off screen" || lower == "turn off the screen" ||
+            lower == "lock screen" || lower == "lock my screen" ||
+            lower == "lock phone" || lower == "lock my phone" || lower == "lock the device"
+        ) {
+            return ParsedSystemCommand(SystemIntentKind.DEVICE_POWER, "sleep")
+        }
+        if (
+            lower == "shut down" || lower == "shutdown" ||
+            lower == "shut down phone" || lower == "shut down my phone" || lower == "shut down the phone" ||
+            lower == "shut down device" || lower == "shut down the device" || lower == "shutdown device" ||
+            lower == "shutdown phone" || lower == "power off" || lower == "power off phone" ||
+            lower == "power off the phone" || lower == "power off device" || lower == "power off the device" ||
+            lower == "turn off phone" || lower == "turn off my phone" || lower == "turn off the phone" ||
+            lower == "turn off device" || lower == "turn off the device"
+        ) {
+            return ParsedSystemCommand(SystemIntentKind.DEVICE_POWER, "shutdown")
+        }
+        if (
+            lower == "restart" || lower == "reboot" ||
+            lower == "restart phone" || lower == "restart my phone" || lower == "restart the phone" ||
+            lower == "restart device" || lower == "restart the device" || lower == "restart my device" ||
+            lower == "reboot phone" || lower == "reboot my phone" || lower == "reboot the phone" ||
+            lower == "reboot device" || lower == "reboot the device"
+        ) {
+            return ParsedSystemCommand(SystemIntentKind.DEVICE_POWER, "restart")
+        }
+        if (
+            lower == "unlock" || lower == "unlock device" || lower == "unlock the device" ||
+            lower == "unlock my device" || lower == "unlock phone" || lower == "unlock my phone" ||
+            lower == "unlock the phone" || lower == "unlock screen" || lower == "unlock my screen" ||
+            lower == "open the device" || lower == "open my device" || lower == "open device" ||
+            lower == "open the phone" || lower == "open my phone"
+        ) {
+            return ParsedSystemCommand(SystemIntentKind.UNLOCK_DEVICE, trimmed)
+        }
+
+        // 1b. Scheduled Automations & Timed Voice Tasks
+        if (
+            lower.contains("list automations") || lower.contains("list my automations") ||
+            lower.contains("show automations") || lower.contains("show my automations") ||
+            lower.contains("what automations") || lower.contains("what tasks are scheduled") ||
+            lower.contains("scheduled tasks") || lower.contains("list scheduled") ||
+            lower.contains("upcoming tasks") || lower.contains("my schedule")
+        ) {
+            return ParsedSystemCommand(SystemIntentKind.LIST_AUTOMATIONS, trimmed)
+        }
+        val cancelAutoMatch = Regex(
+            "^(?:please\\s+)?(?:cancel|delete|remove|stop|clear)\\s+(?:my\\s+|the\\s+)?(?:scheduled\\s+)?(?:automation|automations|scheduled task|task)\\s*(.*)$",
+            RegexOption.IGNORE_CASE
+        ).find(trimmed)
+        if (cancelAutoMatch != null) {
+            return ParsedSystemCommand(
+                SystemIntentKind.CANCEL_AUTOMATION,
+                cancelAutoMatch.groupValues[1].trim()
+            )
+        }
+        val scheduledSpec = ScheduledAutomationEngine.parseScheduleCommand(trimmed)
+        if (scheduledSpec != null) {
+            return ParsedSystemCommand(
+                kind = SystemIntentKind.SCHEDULE_TASK,
+                primaryArg = "${scheduledSpec.triggerAtMs}|${scheduledSpec.repeatDaily}|${scheduledSpec.title}",
+                secondaryArg = scheduledSpec.commandPrompt
+            )
+        }
+
         // 2. Mode Switching (Full App <-> Mini Orb) & Orb Lifecycle Commands
         if (
             lower.contains("close the orb") || lower.contains("close orb") ||
-            lower.contains("go to sleep") || lower.contains("close floating orb") ||
+            lower == "go to sleep" || lower.contains("put orb to sleep") ||
+            lower.contains("put the orb to sleep") || lower.contains("orb go to sleep") ||
+            lower.contains("close floating orb") ||
             lower.contains("hide floating orb") || lower.contains("turn off floating orb") ||
             lower.contains("close mini orb") || lower.contains("dismiss orb")
         ) {
@@ -667,9 +760,38 @@ object JarvisSystemAssistant {
             }
         }
 
-        // 5. Tap / Click button on screen
+        // 5. Press keyboard key OR Tap / Click button / tab on screen
+        val namedKeyMatch = Regex(
+            "^(?:please\\s+)?(?:press|hit|tap)\\s+(?:the\\s+)?(enter|return|go|search|send|next|done|space|spacebar|backspace|delete|shift)(?:\\s+key)?$",
+            RegexOption.IGNORE_CASE
+        ).find(trimmed)
+        if (namedKeyMatch != null) {
+            return ParsedSystemCommand(SystemIntentKind.PRESS_KEY, namedKeyMatch.groupValues[1].trim())
+        }
+        val explicitKeyMatch = Regex(
+            "^(?:please\\s+)?(?:press|hit|tap)\\s+(?:the\\s+)?[\"']?(.+?)[\"']?\\s+key$",
+            RegexOption.IGNORE_CASE
+        ).find(trimmed)
+        if (explicitKeyMatch != null) {
+            val keyTarget = explicitKeyMatch.groupValues[1].trim()
+            if (keyTarget.isNotBlank()) {
+                return ParsedSystemCommand(SystemIntentKind.PRESS_KEY, keyTarget)
+            }
+        }
+
+        val switchTabMatch = Regex(
+            "^(?:please\\s+)?(?:switch\\s+to|select|open)\\s+(?:the\\s+)?[\"']?(.+?)[\"']?\\s+tab$",
+            RegexOption.IGNORE_CASE
+        ).find(trimmed)
+        if (switchTabMatch != null) {
+            val tabTarget = switchTabMatch.groupValues[1].trim()
+            if (tabTarget.isNotBlank() && tabTarget.lowercase(Locale.US) !in internalSectionKeywords) {
+                return ParsedSystemCommand(SystemIntentKind.TAP_TEXT, tabTarget)
+            }
+        }
+
         val tapMatch = Regex(
-            "^(?:please\\s+)?(?:tap|click|press)\\s+(?:on\\s+)?(?:the\\s+)?[\"']?(.+?)[\"']?(?:\\s+button)?$",
+            "^(?:please\\s+)?(?:tap|click|press|select)\\s+(?:on\\s+)?(?:the\\s+)?[\"']?(.+?)[\"']?(?:\\s+(?:button|tab))?$",
             RegexOption.IGNORE_CASE
         ).find(trimmed)
         if (tapMatch != null) {
@@ -1272,9 +1394,38 @@ object JarvisSystemAssistant {
                 "NEWS_RESEARCH" -> parts.firstOrNull()?.takeIf { it.isNotBlank() }?.let { topic ->
                     commands.add(ParsedSystemCommand(SystemIntentKind.NEWS_RESEARCH, topic))
                 }
+                "PRESS_KEY" -> parts.firstOrNull()?.takeIf { it.isNotBlank() }?.let { key ->
+                    commands.add(ParsedSystemCommand(SystemIntentKind.PRESS_KEY, key))
+                }
+                "DEVICE_POWER" -> parts.firstOrNull()?.takeIf { it.isNotBlank() }?.let { mode ->
+                    commands.add(ParsedSystemCommand(SystemIntentKind.DEVICE_POWER, mode))
+                }
+                "UNLOCK_DEVICE" -> commands.add(ParsedSystemCommand(SystemIntentKind.UNLOCK_DEVICE))
+                "SCHEDULE_TASK" -> {
+                    val whenSpec = parts.getOrNull(0).orEmpty()
+                    val repeatArg = parts.getOrNull(1).orEmpty()
+                    val titleArg = parts.getOrNull(2).orEmpty()
+                    val cmdArg = parts.getOrNull(3).orEmpty()
+                    val spec = ScheduledAutomationEngine.parseAiScheduleTag(whenSpec, repeatArg, titleArg, cmdArg)
+                    if (spec != null) {
+                        commands.add(
+                            ParsedSystemCommand(
+                                kind = SystemIntentKind.SCHEDULE_TASK,
+                                primaryArg = "${spec.triggerAtMs}|${spec.repeatDaily}|${spec.title}",
+                                secondaryArg = spec.commandPrompt
+                            )
+                        )
+                    }
+                }
+                "LIST_AUTOMATIONS" -> commands.add(ParsedSystemCommand(SystemIntentKind.LIST_AUTOMATIONS))
+                "CANCEL_AUTOMATION" -> commands.add(ParsedSystemCommand(SystemIntentKind.CANCEL_AUTOMATION, parts.firstOrNull().orEmpty()))
             }
         }
-        val cleaned = rawReply.replace(actionTagRegex, "").replace(Regex("\\n{3,}"), "\n\n").trim()
+        val cleaned = rawReply
+            .replace(actionTagRegex, "")
+            .replace(hudTitleTagRegex, "")
+            .replace(Regex("\\n{3,}"), "\n\n")
+            .trim()
         return cleaned to commands
     }
 
@@ -1496,12 +1647,25 @@ object JarvisSystemAssistant {
                 if (svc == null) {
                     SystemExecutionResult(
                         handled = true,
-                        replyText = "Turn on Screen Helper in Home or Settings first, Sir, so I can tap buttons for you.",
+                        replyText = "Turn on Screen Helper in Home or Settings first, Sir, so I can tap buttons and tabs for you.",
                         actionLabel = "Screen Helper Needed"
                     )
                 } else {
                     val outcome = svc.clickNodeByText(command.primaryArg)
                     SystemExecutionResult(true, outcome.message, "Screen Tap", outcome.success)
+                }
+            }
+            SystemIntentKind.PRESS_KEY -> {
+                val svc = JarvisAccessibilityService.activeInstance()
+                if (svc == null) {
+                    SystemExecutionResult(
+                        handled = true,
+                        replyText = "Turn on Screen Helper in Home or Settings first, Sir, so I can press keyboard keys for you.",
+                        actionLabel = "Screen Helper Needed"
+                    )
+                } else {
+                    val outcome = svc.pressKeyboardKey(command.primaryArg)
+                    SystemExecutionResult(true, outcome.message, "Key Press", outcome.success)
                 }
             }
             SystemIntentKind.SCROLL_SCREEN -> {

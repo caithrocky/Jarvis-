@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import com.example.JarvisApplication
@@ -15,12 +16,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class JarvisVoiceService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var sleepAudioWakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -30,6 +33,7 @@ class JarvisVoiceService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val app = application as JarvisApplication
         if (intent?.action == ACTION_STOP) {
+            releaseSleepWakeLock()
             serviceScope.launch {
                 app.preferencesRepository.setWakeWordEnabled(false)
             }
@@ -41,7 +45,7 @@ class JarvisVoiceService : Service() {
 
         val notification = JarvisNotificationHelper.buildVoiceForegroundNotification(
             this,
-            "Say \"Hey JARVIS\" anytime — even when closed"
+            "Say \"Hey JARVIS\" anytime — active even on sleep"
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
@@ -55,6 +59,14 @@ class JarvisVoiceService : Service() {
 
         app.commandCoordinator.attachVoiceEngineCallbacks()
         app.voiceEngine.startAlwaysOnWakeWordLoop()
+        syncSleepWakeLock(app)
+
+        // Keep CPU audio loop alive while sleep-listening unless explicitly muted
+        serviceScope.launch {
+            app.voiceEngine.isMuted.collectLatest { muted ->
+                if (muted) releaseSleepWakeLock() else acquireSleepWakeLock()
+            }
+        }
 
         // Ensure Mini Orb overlay daemon stands ready in collapsed standby when app is closed & permission granted
         serviceScope.launch {
@@ -71,6 +83,36 @@ class JarvisVoiceService : Service() {
             }
         }
         return START_STICKY
+    }
+
+    private fun syncSleepWakeLock(app: JarvisApplication) {
+        if (!app.voiceEngine.isMuted.value && app.voiceEngine.hasMicPermission()) {
+            acquireSleepWakeLock()
+        } else {
+            releaseSleepWakeLock()
+        }
+    }
+
+    private fun acquireSleepWakeLock() {
+        val current = sleepAudioWakeLock
+        if (current != null && current.isHeld) return
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+        runCatching {
+            val lock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "JarvisAI::SleepAudioWakeLock").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+            sleepAudioWakeLock = lock
+        }
+    }
+
+    private fun releaseSleepWakeLock() {
+        runCatching {
+            sleepAudioWakeLock?.let { lock ->
+                if (lock.isHeld) lock.release()
+            }
+        }
+        sleepAudioWakeLock = null
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -96,6 +138,7 @@ class JarvisVoiceService : Service() {
     }
 
     override fun onDestroy() {
+        releaseSleepWakeLock()
         serviceScope.cancel()
         super.onDestroy()
     }

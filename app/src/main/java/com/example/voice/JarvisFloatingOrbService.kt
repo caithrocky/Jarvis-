@@ -393,6 +393,29 @@ class JarvisFloatingOrbService : Service() {
         orb.startAnim()
 
         serviceScope.launch {
+            combine(
+                app.preferencesRepository.settingsFlow,
+                app.voiceEngine.isMuted,
+                app.commandCoordinator.suppressScreenAwakeTemporarily
+            ) { settings, muted, suppressed ->
+                settings.keepScreenAwakeWhileActive && (settings.wakeWordEnabled || !muted) && !suppressed
+            }.collectLatest { keepAwake ->
+                val p = layoutParams ?: return@collectLatest
+                val hasFlag = (p.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0
+                if (keepAwake != hasFlag) {
+                    p.flags = if (keepAwake) {
+                        p.flags or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+                    } else {
+                        p.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON.inv()
+                    }
+                    runCatching {
+                        rootContainer?.let { windowManager.updateViewLayout(it, p) }
+                    }
+                }
+            }
+        }
+
+        serviceScope.launch {
             val voiceBundle = combine(
                 app.voiceEngine.phase,
                 app.voiceEngine.rmsLevel,
@@ -463,7 +486,10 @@ class JarvisFloatingOrbService : Service() {
                     MiniOrbVisualState.EXECUTING -> "J.A.R.V.I.S • Executing"
                     MiniOrbVisualState.SUCCESS -> "J.A.R.V.I.S • Complete"
                     MiniOrbVisualState.ERROR -> "J.A.R.V.I.S • Warning"
-                    MiniOrbVisualState.STANDBY -> "J.A.R.V.I.S • Standby"
+                    MiniOrbVisualState.STANDBY -> {
+                        val focus = app.commandCoordinator.aiHudHeadline.value
+                        if (!focus.isNullOrBlank()) "J.A.R.V.I.S • ${focus.take(26)}" else "J.A.R.V.I.S • Standby"
+                    }
                 }
 
                 val confPct = (v.speakerConfidence * 100f).toInt().coerceIn(0, 100)

@@ -498,4 +498,158 @@ class JarvisEngineUnitTest {
             assertTrue(voice.nimVoiceName.startsWith("Magpie-Multilingual.EN-US."))
         }
     }
+
+    @Test
+    fun `system assistant parses keyboard key presses, tabs, power sleep shutdown restart, and unlock commands`() {
+        val enterKey = JarvisSystemAssistant.parseCommand("Press enter")
+        assertEquals(SystemIntentKind.PRESS_KEY, enterKey?.kind)
+        assertEquals("enter", enterKey?.primaryArg?.lowercase())
+
+        val backspaceKey = JarvisSystemAssistant.parseCommand("Tap backspace key")
+        assertEquals(SystemIntentKind.PRESS_KEY, backspaceKey?.kind)
+        assertEquals("backspace", backspaceKey?.primaryArg?.lowercase())
+
+        val tabCmd = JarvisSystemAssistant.parseCommand("Switch to Chats tab")
+        assertEquals(SystemIntentKind.TAP_TEXT, tabCmd?.kind)
+        assertEquals("Chats", tabCmd?.primaryArg)
+
+        val tapTabCmd = JarvisSystemAssistant.parseCommand("Tap Updates tab")
+        assertEquals(SystemIntentKind.TAP_TEXT, tapTabCmd?.kind)
+        assertEquals("Updates", tapTabCmd?.primaryArg)
+
+        val sleepDevice = JarvisSystemAssistant.parseCommand("Make the device sleep")
+        assertEquals(SystemIntentKind.DEVICE_POWER, sleepDevice?.kind)
+        assertEquals("sleep", sleepDevice?.primaryArg)
+
+        val lockScreen = JarvisSystemAssistant.parseCommand("Lock my screen")
+        assertEquals(SystemIntentKind.DEVICE_POWER, lockScreen?.kind)
+        assertEquals("sleep", lockScreen?.primaryArg)
+
+        val shutdownDevice = JarvisSystemAssistant.parseCommand("Shut down phone")
+        assertEquals(SystemIntentKind.DEVICE_POWER, shutdownDevice?.kind)
+        assertEquals("shutdown", shutdownDevice?.primaryArg)
+
+        val restartDevice = JarvisSystemAssistant.parseCommand("Restart the phone")
+        assertEquals(SystemIntentKind.DEVICE_POWER, restartDevice?.kind)
+        assertEquals("restart", restartDevice?.primaryArg)
+
+        val unlockDevice = JarvisSystemAssistant.parseCommand("Open the device")
+        assertEquals(SystemIntentKind.UNLOCK_DEVICE, unlockDevice?.kind)
+
+        val unlockPhone = JarvisSystemAssistant.parseCommand("Unlock my phone")
+        assertEquals(SystemIntentKind.UNLOCK_DEVICE, unlockPhone?.kind)
+
+        val (stripped, actions) = JarvisSystemAssistant.extractAndStripAiActions(
+            "Right away, Sir. [ACTION:PRESS_KEY|enter] [ACTION:DEVICE_POWER|restart] [ACTION:UNLOCK_DEVICE]"
+        )
+        assertEquals("Right away, Sir.", stripped)
+        assertEquals(3, actions.size)
+        assertEquals(SystemIntentKind.PRESS_KEY, actions[0].kind)
+        assertEquals("enter", actions[0].primaryArg)
+        assertEquals(SystemIntentKind.DEVICE_POWER, actions[1].kind)
+        assertEquals("restart", actions[1].primaryArg)
+        assertEquals(SystemIntentKind.UNLOCK_DEVICE, actions[2].kind)
+    }
+
+    @Test
+    fun `offline assistant engine evaluates math deterministically without internet`() {
+        assertEquals("25 * 4 = 100", com.example.assistant.OfflineAssistantEngine.tryEvaluateMath("what is 25 times 4"))
+        assertEquals("15% of 200 is 30", com.example.assistant.OfflineAssistantEngine.tryEvaluateMath("calculate 15% of 200"))
+        assertEquals("Division by zero is undefined", com.example.assistant.OfflineAssistantEngine.tryEvaluateMath("10 / 0"))
+        assertNull(com.example.assistant.OfflineAssistantEngine.tryEvaluateMath("explain quantum entanglement"))
+    }
+
+    @Test
+    fun `scheduled automation parser handles timed tasks, list, cancel, and HUD_TITLE tags`() {
+        val now = 1_760_000_000_000L
+        val relativeTask = com.example.assistant.ScheduledAutomationEngine.parseScheduleCommand(
+            "In 15 minutes remind me to check my emails",
+            nowMs = now
+        )
+        assertNotNull(relativeTask)
+        assertEquals(now + 15 * 60_000L, relativeTask!!.triggerAtMs)
+        assertTrue(relativeTask.commandPrompt.contains("check my emails", ignoreCase = true))
+
+        val dailyBrief = JarvisSystemAssistant.parseCommand("Every morning at 8:00 AM give me my daily briefing")
+        assertEquals(SystemIntentKind.SCHEDULE_TASK, dailyBrief?.kind)
+        assertTrue(dailyBrief?.primaryArg?.contains("|true|") == true)
+
+        val listCmd = JarvisSystemAssistant.parseCommand("List my automations")
+        assertEquals(SystemIntentKind.LIST_AUTOMATIONS, listCmd?.kind)
+
+        val cancelCmd = JarvisSystemAssistant.parseCommand("Cancel automation daily briefing")
+        assertEquals(SystemIntentKind.CANCEL_AUTOMATION, cancelCmd?.kind)
+        assertEquals("daily briefing", cancelCmd?.primaryArg)
+
+        val (hudClean, hudTitle) = JarvisSystemAssistant.extractHudTitleAndClean(
+            "Queued your morning routine, Sir. [HUD_TITLE:Morning Brief Armed] [ACTION:SCHEDULE_TASK|07:30|true|Morning Brief|Daily briefing]"
+        )
+        assertEquals("Morning Brief Armed", hudTitle)
+        val (fullyClean, actions) = JarvisSystemAssistant.extractAndStripAiActions(hudClean)
+        assertEquals("Queued your morning routine, Sir.", fullyClean)
+        assertEquals(1, actions.size)
+        assertEquals(SystemIntentKind.SCHEDULE_TASK, actions.first().kind)
+    }
+
+    @Test
+    fun `hud intelligence dynamically switches headlines and generates real mission suggestions`() {
+        val voiceSpot = com.example.assistant.JarvisHudIntelligence.buildSpotlight(
+            partialVoiceText = "open whatsapp and text alex",
+            isListening = true,
+            isProcessing = false,
+            isSpeaking = false,
+            isExecuting = false,
+            isMicMuted = false,
+            lastUserPrompt = "",
+            aiChosenHeadline = null,
+            taskProgressTitle = "",
+            pendingConfirmationSummary = null,
+            isOnline = true,
+            batteryPercent = 82,
+            isCharging = false,
+            unreadNotificationCount = 0,
+            learnedAppsCount = 12,
+            memoriesCount = 3,
+            activeAutomations = emptyList(),
+            recentMemories = emptyList(),
+            rotationTick = 0
+        )
+        assertEquals("VOICE STREAM ACTIVE", voiceSpot.kicker)
+        assertTrue(voiceSpot.headline.contains("Open whatsapp", ignoreCase = true))
+
+        val aiSpot = com.example.assistant.JarvisHudIntelligence.buildSpotlight(
+            partialVoiceText = "",
+            isListening = false,
+            isProcessing = false,
+            isSpeaking = false,
+            isExecuting = false,
+            isMicMuted = false,
+            lastUserPrompt = "Check market status",
+            aiChosenHeadline = "Live Market Radar",
+            taskProgressTitle = "",
+            pendingConfirmationSummary = null,
+            isOnline = true,
+            batteryPercent = 82,
+            isCharging = false,
+            unreadNotificationCount = 2,
+            learnedAppsCount = 12,
+            memoriesCount = 3,
+            activeAutomations = emptyList(),
+            recentMemories = emptyList(),
+            rotationTick = 0
+        )
+        assertEquals("ACTIVE MISSION FOCUS", aiSpot.kicker)
+        assertTrue(aiSpot.headline.contains("Live Market Radar"))
+
+        val suggestions = com.example.assistant.JarvisHudIntelligence.buildAutogeneratedSuggestions(
+            isOnline = true,
+            batteryPercent = 18,
+            unreadNotificationCount = 3,
+            learnedAppsCount = 0,
+            activeAutomations = emptyList(),
+            learnedApps = emptyList()
+        )
+        assertTrue(suggestions.any { it.id == "triage_alerts" })
+        assertTrue(suggestions.any { it.id == "schedule_morning_brief" })
+    }
 }

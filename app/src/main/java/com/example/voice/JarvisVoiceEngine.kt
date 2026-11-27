@@ -590,7 +590,7 @@ class JarvisVoiceEngine(
                 val cleanSentence = sanitizeSpeechInput(chunk.text)
                 if (cleanSentence.isBlank()) continue
 
-                if (magpieTtsClient != null && SecretsConfig.hasNvidiaNim) {
+                if (magpieTtsClient != null && SecretsConfig.hasNvidiaNim && isNetworkConnected()) {
                     val synth = synthesizeWithMagpieRetry(cleanSentence, token)
                     if (!isActive || speechGeneration.get() != token) break
                     if (synth != null && synth.pcmBytes.isNotEmpty()) {
@@ -599,7 +599,11 @@ class JarvisVoiceEngine(
                         _statusDetail.value = "Magpie voice unreachable — response shown on screen"
                     }
                 } else {
-                    _statusDetail.value = "NVIDIA NIM key needed for Magpie voice"
+                    _statusDetail.value = if (!isNetworkConnected()) {
+                        "Offline mode — response shown on screen"
+                    } else {
+                        "NVIDIA NIM key needed for Magpie voice"
+                    }
                 }
             }
             if (speechGeneration.get() == token) {
@@ -646,6 +650,11 @@ class JarvisVoiceEngine(
 
         if (magpieTtsClient == null || !SecretsConfig.hasNvidiaNim) {
             _statusDetail.value = "NVIDIA NIM API key needed for JARVIS voice"
+            onSpeechCompleted(followUpListen)
+            return
+        }
+        if (!isNetworkConnected()) {
+            _statusDetail.value = "Offline mode — response shown on screen"
             onSpeechCompleted(followUpListen)
             return
         }
