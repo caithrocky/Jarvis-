@@ -22,7 +22,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -36,7 +35,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.pm.PackageInfoCompat
 import com.example.data.local.JarvisUserSettings
@@ -69,7 +67,6 @@ fun SettingsScreen(
     onUpdateVoiceSpeed: (Float) -> Unit,
     onToggleAlwaysOn: (Boolean) -> Unit,
     onToggleVoiceOutput: (Boolean) -> Unit,
-    onToggleNvidiaMagpieVoice: (Boolean) -> Unit,
     onPreviewVoice: () -> Unit,
     onToggleMemory: (Boolean) -> Unit,
     onClearMemories: () -> Unit,
@@ -77,8 +74,6 @@ fun SettingsScreen(
     onToggleHighContrastHud: (Boolean) -> Unit,
     onTestNvidiaConnection: () -> Unit,
     onTriggerManualUpdateCheck: () -> Unit,
-    onSaveNvidiaKeyOverride: (String) -> Unit,
-    onClearNvidiaKeyOverride: () -> Unit,
     onToggleShowTapIndicator: (Boolean) -> Unit,
     onToggleShowHighlightIndicator: (Boolean) -> Unit,
     onToggleShowScrollIndicator: (Boolean) -> Unit,
@@ -105,8 +100,6 @@ fun SettingsScreen(
         val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
         pm?.isIgnoringBatteryOptimizations(context.packageName) == true
     }
-
-    var nvidiaKeyInput by remember { mutableStateOf("") }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -282,7 +275,7 @@ fun SettingsScreen(
             }
         }
 
-        // NVIDIA NIM Intelligence Model & Key Fallback
+        // NVIDIA NIM Intelligence Model (API key bound via Secrets/BuildConfig)
         item {
             HudGlassCard {
                 Text("NVIDIA NIM INTELLIGENCE MODEL", style = MaterialTheme.typography.titleMedium, color = ArcCyan)
@@ -314,50 +307,14 @@ fun SettingsScreen(
                 ) { Text("Test NVIDIA NIM & Magpie Voice") }
                 Spacer(Modifier.height(10.dp))
                 Text(
-                    text = when {
-                        uiState.hasBuildConfigNvidiaKey -> "Build Key Status: Embedded at build time."
-                        uiState.hasRuntimeNvidiaKeyOverride -> "Build Key Missing — using encrypted key saved on this device."
-                        else -> "Build Key Missing. Save your nvapi- key below to keep NVIDIA NIM & Magpie voice working across updates:"
+                    text = if (uiState.hasBuildConfigNvidiaKey || uiState.hasRuntimeNvidiaKeyOverride) {
+                        "NVIDIA NIM & Magpie Voice Status: Key Active"
+                    } else {
+                        "NVIDIA NIM Key Not Bound — provide your NVIDIA NIM API key to embed permanently in JARVIS Secrets."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = if (uiState.hasBuildConfigNvidiaKey || uiState.hasRuntimeNvidiaKeyOverride) ProfitEmerald else WarningAmber
                 )
-                Spacer(Modifier.height(6.dp))
-                OutlinedTextField(
-                    value = nvidiaKeyInput,
-                    onValueChange = { nvidiaKeyInput = it },
-                    label = { Text("Encrypted NVIDIA NIM Key Fallback (nvapi-...)") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    singleLine = true,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("nvidia_key_override_input")
-                )
-                Spacer(Modifier.height(6.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = {
-                            onSaveNvidiaKeyOverride(nvidiaKeyInput)
-                            nvidiaKeyInput = ""
-                        },
-                        enabled = nvidiaKeyInput.isNotBlank(),
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("save_nvidia_key_btn")
-                    ) {
-                        Text("Save Encrypted Key")
-                    }
-                    if (uiState.hasRuntimeNvidiaKeyOverride) {
-                        OutlinedButton(
-                            onClick = onClearNvidiaKeyOverride,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("clear_nvidia_key_btn")
-                        ) {
-                            Text("Clear Saved Key")
-                        }
-                    }
-                }
                 uiState.diagnosticResult?.let { diag ->
                     Spacer(Modifier.height(6.dp))
                     Text(diag, style = MaterialTheme.typography.labelMedium, color = ArcCyan)
@@ -372,26 +329,20 @@ fun SettingsScreen(
                 Spacer(Modifier.height(8.dp))
                 SettingToggleRow(
                     title = "Always-On \"Hey JARVIS\" Listener",
-                    subtitle = "Runs foreground microphone service with persistent indicator",
+                    subtitle = "Runs foreground microphone service with silent voice detection",
                     checked = settings.wakeWordEnabled,
                     onCheckedChange = { want ->
                         if (want && !hasMicPermission) onRequestMicPermission() else onToggleAlwaysOn(want)
                     }
                 )
                 SettingToggleRow(
-                    title = "Spoken TTS Responses",
-                    subtitle = "Read JARVIS answers aloud with interruption support",
+                    title = "Spoken Neural Responses",
+                    subtitle = "Speaks with NVIDIA Magpie Neural Voice (zero robotic TTS)",
                     checked = settings.voiceOutputEnabled,
                     onCheckedChange = onToggleVoiceOutput
                 )
-                SettingToggleRow(
-                    title = "NVIDIA Magpie Neural Voice (NIM)",
-                    subtitle = "Uses nvidia/magpie-tts-multilingual instead of robotic device TTS",
-                    checked = settings.useNvidiaMagpieVoice,
-                    onCheckedChange = onToggleNvidiaMagpieVoice
-                )
                 Spacer(Modifier.height(8.dp))
-                Text("Voice Personality", style = MaterialTheme.typography.labelLarge)
+                Text("NVIDIA Magpie Voice (${VoicePersonality.entries.size} Voices)", style = MaterialTheme.typography.labelLarge)
                 Spacer(Modifier.height(4.dp))
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     VoicePersonality.entries.forEach { vp ->

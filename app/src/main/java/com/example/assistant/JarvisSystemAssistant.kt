@@ -378,10 +378,14 @@ object JarvisSystemAssistant {
                         }
                         SystemIntentKind.SOCIAL_ACTION -> {
                             val prev = refined.lastOrNull()
-                            if (prev?.kind == SystemIntentKind.OPEN_APP && cmd.secondaryArg.isBlank()) {
+                            if (prev?.kind == SystemIntentKind.OPEN_APP) {
                                 val socialName = canonicalSocialPlatformName(prev.primaryArg.lowercase(Locale.US))
-                                refined.removeAt(refined.lastIndex)
-                                refined.add(cmd.copy(secondaryArg = socialName))
+                                if (cmd.secondaryArg.isBlank() || socialName.equals(cmd.secondaryArg, ignoreCase = true)) {
+                                    refined.removeAt(refined.lastIndex)
+                                    refined.add(cmd.copy(secondaryArg = socialName))
+                                } else {
+                                    refined.add(cmd)
+                                }
                             } else {
                                 refined.add(cmd)
                             }
@@ -407,6 +411,11 @@ object JarvisSystemAssistant {
         parseCommand(seg)?.let { direct ->
             if (direct.kind == SystemIntentKind.SOCIAL_ACTION && direct.secondaryArg.isBlank() && !inheritedSocialPlatform.isNullOrBlank()) {
                 return direct.copy(secondaryArg = inheritedSocialPlatform)
+            }
+            if (direct.kind == SystemIntentKind.TEXT_CONTACT && !inheritedMessagingPlatform.isNullOrBlank() &&
+                direct.primaryArg == "Messages" && !segLower.contains("sms") && !segLower.contains("messages")
+            ) {
+                return direct.copy(primaryArg = inheritedMessagingPlatform)
             }
             return direct
         }
@@ -1330,7 +1339,7 @@ object JarvisSystemAssistant {
         val chromeTry = launchIntent(
             context = context,
             intent = chromeIntent,
-            successReply = "Opening $safeUrl in Google Chrome, Sir. Tap my glowing orb anytime if you'd like me to read, analyze, or fill details on the page.",
+            successReply = "Opening $safeUrl in Google Chrome, Sir. Ask me anytime if you'd like me to read, analyze, or fill details on the page.",
             failureReply = "",
             actionLabel = "Chrome Browser"
         )

@@ -51,6 +51,12 @@ private data class PendingMessageSession(
     val createdAtMs: Long = System.currentTimeMillis()
 )
 
+private data class DirectCommandOutcome(
+    val reply: String,
+    val label: String,
+    val success: Boolean = true
+)
+
 /**
  * Shared command, messaging, autonomous UI agent & AI execution brain used by both
  * MainActivity/ViewModel (Mode A) and the voice-first Floating Mini-Orb plugin (Mode B).
@@ -316,8 +322,13 @@ class JarvisCommandCoordinator(
             // 2. Deterministic direct command routing (mode switch, apps, Play Store, notifications, news, messaging, social, settings)
             val directMatch = tryHandleDirectCommand(prompt, currentSettings, fromVoice)
             if (directMatch != null) {
-                updateTaskProgress(TaskStage.COMPLETED, directMatch.second, directMatch.first.take(64), autoClear = true)
-                finishDirectReply(directMatch.first, directMatch.second, currentSettings, fromVoice)
+                updateTaskProgress(
+                    if (directMatch.success) TaskStage.COMPLETED else TaskStage.FAILED,
+                    directMatch.label,
+                    directMatch.reply.take(64),
+                    autoClear = true
+                )
+                finishDirectReply(directMatch.reply, directMatch.label, currentSettings, fromVoice)
                 return@launch
             }
 
@@ -346,8 +357,11 @@ class JarvisCommandCoordinator(
                 indexedScreenMap = indexedMap.takeIf { it.isNotBlank() }
             )
 
-            // Prepare sentence-by-sentence streaming voice pipeline if speech output is active
+            // Prepare sentence-by-sentence streaming voice pipeline for non-task conversational replies;
+            // device-task prompts must execute & verify real results BEFORE JARVIS speaks confirmation.
+            val looksLikeTask = looksLikeDeviceTaskRequest(prompt)
             val allowStreamingVoice = currentSettings.voiceOutputEnabled && !voiceEngine.isMuted.value
+            val allowStreamingProse = allowStreamingVoice && !looksLikeTask
             var streamSpeechToken = -1
             var streamedSentenceCursor = 0
             var sawBracketInStream = false
@@ -362,7 +376,7 @@ class JarvisCommandCoordinator(
                     val (visiblePartial, _) = JarvisSystemAssistant.extractAndStripAiActions(partial)
                     _streamingReply.value = visiblePartial
 
-                    if (allowStreamingVoice && !sawBracketInStream) {
+                    if (allowStreamingProse && !sawBracketInStream) {
                         if (partial.contains('[')) {
                             sawBracketInStream = true
                         } else if (visiblePartial.length > streamedSentenceCursor) {
@@ -400,7 +414,21 @@ class JarvisCommandCoordinator(
                     val actionNotes = mutableListOf<String>()
                     if (webContext != null) executedActionLabels.add("Web Search")
 
-                    if (actionsToRun.isNotEmpty()) {
+                    if (actionsToRun.isEmpty() && looksLikeTask) {
+                        if (svc != null) {
+                            updateTaskProgress(TaskStage.EXECUTING, "Autonomous Agent", prompt.take(44))
+                            val (autoOk, autoOutcome) = runAutonomousUiTask(prompt, currentSettings)
+                            executedActionLabels.add("Autonomous UI Agent")
+                            actionNotes.add(autoOutcome)
+                            if (!autoOk) taskFailed = true
+                        } else {
+                            taskFailed = true
+                            executedActionLabels.add("Screen Helper Needed")
+                            actionNotes.add(
+                                "I couldn't run that action automatically yet, Sir — enable JARVIS Screen Helper in Accessibility Settings or name the exact app or contact step for me."
+                            )
+                        }
+                    } else if (actionsToRun.isNotEmpty()) {
                         updateTaskProgress(
                             TaskStage.EXECUTING,
                             "Executing Actions",
@@ -468,9 +496,10 @@ class JarvisCommandCoordinator(
                                 if (res.first.isNotBlank()) actionNotes.add(res.first)
                             }
                             SystemIntentKind.AUTONOMOUS_TASK -> {
-                                val autoOutcome = runAutonomousUiTask(cmd.primaryArg.ifBlank { prompt }, currentSettings)
+                                val (autoOk, autoOutcome) = runAutonomousUiTask(cmd.primaryArg.ifBlank { prompt }, currentSettings)
                                 executedActionLabels.add("Autonomous UI Agent")
                                 actionNotes.add(autoOutcome)
+                                if (!autoOk) taskFailed = true
                             }
                             SystemIntentKind.STUDY_DEVICE -> {
                                 val report = deviceLearningEngine.studyDeviceNow(force = true)
@@ -508,6 +537,7 @@ class JarvisCommandCoordinator(
                                     taskFailed = true
                                     actionNotes.add("Voiceprint verification required to fill saved credentials under Sir's lock.")
                                 } else {
+                                    val beforePkg = svc?.activeForegroundPackage().orEmpty()
                                     val outcome = JarvisSystemAssistant.execute(context, cmd)
                                     if (outcome.actionLabel.isNotBlank()) {
                                         executedActionLabels.add(outcome.actionLabel)
@@ -540,12 +570,19 @@ class JarvisCommandCoordinator(
                                         SystemIntentKind.SET_ALARM,
                                         SystemIntentKind.SET_TIMER
                                     )
-                                    if (hasMoreSteps && outcome.launchedTarget &&
+                                    if (outcome.launchedTarget &&
                                         cmd.kind in setOf(SystemIntentKind.OPEN_APP, SystemIntentKind.OPEN_URL, SystemIntentKind.PLATFORM_SEARCH, SystemIntentKind.WEB_SEARCH)
                                     ) {
                                         val waitTarget = if (cmd.kind == SystemIntentKind.OPEN_APP) cmd.primaryArg else "chrome"
-                                        waitForAppForeground(svc, waitTarget, 3800L)
-                                        delay(320L)
+                                        val maxWait = if (hasMoreSteps) 3800L else 2400L
+                                        val entered = waitForAppForeground(svc, waitTarget, maxWait, beforePkg)
+                                        if (hasMoreSteps) {
+                                            delay(320L)
+                                        }
+                                        if (svc != null && !entered && cmd.kind == SystemIntentKind.OPEN_APP && !waitTarget.equals("jarvis", ignoreCase = true)) {
+                                            taskFailed = true
+                                            actionNotes.add("I tried opening ${cmd.primaryArg}, Sir, but Android hasn't brought it onto the screen yet (check if your screen is locked or allow Background Pop-up permission for JARVIS).")
+                                        }
                                     } else if (isActionableKind && !outcome.launchedTarget && outcome.replyText.isNotBlank()) {
                                         taskFailed = true
                                         actionNotes.add(outcome.replyText)
@@ -564,7 +601,7 @@ class JarvisCommandCoordinator(
                     }
 
                     // Flush remaining prose into streaming speech session if no action override replaced it
-                    if (allowStreamingVoice && streamSpeechToken != -1 && !usedActionOverrideNote) {
+                    if (allowStreamingProse && streamSpeechToken != -1 && !usedActionOverrideNote && !taskFailed) {
                         val remaining = cleanedReply.drop(streamedSentenceCursor.coerceIn(0, cleanedReply.length)).trim()
                         if (remaining.isNotBlank()) {
                             voiceEngine.enqueueStreamingSpeechSentence(streamSpeechToken, remaining)
@@ -651,7 +688,7 @@ class JarvisCommandCoordinator(
             return "To switch into the floating Mini Orb, allow 'Display over other apps' on Home or in Settings first, Sir." to "Overlay Permission Needed"
         }
         manualOrbPinned = true
-        JarvisFloatingOrbService.start(context, expandBubble = true, startListening = voiceEngine.hasMicPermission())
+        JarvisFloatingOrbService.start(context, expandBubble = true, startListening = false)
         sessionManager.onExplicitSwitchToMiniOrb()
         localRepo.logAiActivitySyncSafe("MODE_SWITCH", "Switched to Floating Mini Orb")
         return "Switching to Mini Orb right now, Sir — I'm floating right beside you." to "Mini Orb Active"
@@ -732,13 +769,15 @@ class JarvisCommandCoordinator(
     private suspend fun waitForAppForeground(
         svc: JarvisAccessibilityService?,
         appOrPlatform: String,
-        maxWaitMs: Long = 4000L
+        maxWaitMs: Long = 4000L,
+        previousForegroundPackage: String = ""
     ): Boolean {
         if (svc == null) {
             delay(minOf(1300L, maxWaitMs))
             return false
         }
         val lower = appOrPlatform.lowercase(Locale.US).trim()
+        val beforeLower = previousForegroundPackage.lowercase(Locale.US).trim()
         val expectedHints = when {
             lower.contains("whatsapp") -> listOf("whatsapp")
             lower.contains("instagram") -> listOf("instagram")
@@ -753,19 +792,28 @@ class JarvisCommandCoordinator(
             lower.contains("discord") -> listOf("discord")
             lower.contains("reddit") -> listOf("reddit")
             lower.contains("facebook") -> listOf("facebook", "katana")
+            lower.contains("message") || lower == "sms" -> listOf("messag", "mms")
+            lower.contains("phone") || lower.contains("dialer") -> listOf("dialer", "telecom", "incallui", "contacts")
+            lower.contains("gmail") || lower == "mail" -> listOf("gmail", ".gm")
+            lower.contains("note") -> listOf("note", "keep")
+            lower.contains("camera") -> listOf("cam")
             else -> listOf(lower.replace(Regex("[^a-z0-9]"), "")).filter { it.length >= 2 }
         }
         if (expectedHints.isEmpty()) {
             delay(950L)
             return true
         }
+        val ownPkg = context.packageName.lowercase(Locale.US)
         val deadline = System.currentTimeMillis() + maxWaitMs
         while (System.currentTimeMillis() < deadline && !abortRequested) {
             val fg = svc.activeForegroundPackage().orEmpty().lowercase(Locale.US)
-            if (fg.isNotBlank() && fg != context.packageName.lowercase(Locale.US) &&
-                expectedHints.any { fg.contains(it) }
-            ) {
-                return true
+            if (fg.isNotBlank() && fg != ownPkg) {
+                if (expectedHints.any { fg.contains(it) }) {
+                    return true
+                }
+                if (beforeLower.isNotBlank() && fg != beforeLower && !fg.contains("launcher") && !fg.contains("systemui")) {
+                    return true
+                }
             }
             delay(220L)
         }
@@ -1049,9 +1097,9 @@ class JarvisCommandCoordinator(
         return result.message to "Social Control"
     }
 
-    private suspend fun runAutonomousUiTask(goal: String, settings: JarvisUserSettings): String {
+    private suspend fun runAutonomousUiTask(goal: String, settings: JarvisUserSettings): Pair<Boolean, String> {
         val svc = JarvisAccessibilityService.activeInstance()
-            ?: return "Turn on JARVIS Screen Helper first, Sir, so I can inspect the screen and complete that task automatically."
+            ?: return false to "Turn on JARVIS Screen Helper first, Sir, so I can inspect the screen and complete that task automatically."
 
         val maxSteps = 12
         val stepLog = mutableListOf<String>()
@@ -1062,7 +1110,7 @@ class JarvisCommandCoordinator(
         for (step in 1..maxSteps) {
             if (abortRequested) {
                 _autonomousStepStatus.value = ""
-                return "Paused autonomous steps at your command, Sir."
+                return false to "Paused autonomous steps at your command, Sir."
             }
 
             updateTaskProgress(TaskStage.EXECUTING, "Autonomous Agent", "Studying screen (step $step/$maxSteps)", step, maxSteps)
@@ -1101,10 +1149,13 @@ class JarvisCommandCoordinator(
                     val (cleanMsg, tags) = JarvisSystemAssistant.extractAndStripAiActions(res.replyText)
                     if (tags.isEmpty()) {
                         _autonomousStepStatus.value = ""
-                        if (stepLog.isNotEmpty() && lastPkg.isNotBlank()) {
+                        if (stepLog.isEmpty()) {
+                            return false to "I inspected the screen, Sir, but couldn't find an automatic UI step to execute \"$goal\"."
+                        }
+                        if (lastPkg.isNotBlank()) {
                             localRepo.saveLearnedWorkflow(lastPkg, goal, stepLog.joinToString(" -> "))
                         }
-                        return cleanMsg.ifBlank { "Task completed on screen, Sir." }
+                        return true to cleanMsg.ifBlank { "Executed ${stepLog.size} screen steps for \"$goal\", Sir." }
                     }
                     val nextCmd = tags.first()
                     val sig = "$lastPkg|${nextCmd.kind}|${nextCmd.primaryArg}"
@@ -1112,18 +1163,21 @@ class JarvisCommandCoordinator(
                         repeatedActionCount++
                         if (repeatedActionCount >= 2) {
                             _autonomousStepStatus.value = ""
-                            return "I reached a screen loop trying ${nextCmd.kind.name.lowercase()} (${nextCmd.primaryArg}) repeatedly, Sir. Tell me what you'd like me to tap instead."
+                            return false to "I reached a screen loop trying ${nextCmd.kind.name.lowercase()} (${nextCmd.primaryArg}) repeatedly, Sir. Tell me what you'd like me to do instead."
                         }
                     } else {
                         lastActionSignature = sig
                         repeatedActionCount = 0
                     }
 
+                    val beforePkg = svc.activeForegroundPackage().orEmpty()
                     val exec = JarvisSystemAssistant.execute(context, nextCmd)
-                    stepLog.add("${nextCmd.kind}:${nextCmd.primaryArg}")
+                    if (exec.launchedTarget) {
+                        stepLog.add("${nextCmd.kind}:${nextCmd.primaryArg}")
+                    }
                     _autonomousStepStatus.value = "Step $step/$maxSteps: ${exec.actionLabel}"
                     if (nextCmd.kind == SystemIntentKind.OPEN_APP && exec.launchedTarget) {
-                        waitForAppForeground(svc, nextCmd.primaryArg, 3600L)
+                        waitForAppForeground(svc, nextCmd.primaryArg, 3600L, beforePkg)
                         delay(300L)
                     } else {
                         delay(850L)
@@ -1131,7 +1185,7 @@ class JarvisCommandCoordinator(
                 }
                 else -> {
                     _autonomousStepStatus.value = ""
-                    return "I hit a connection snag while planning the next screen step, Sir."
+                    return false to "I hit a connection snag while planning the next screen step, Sir."
                 }
             }
         }
@@ -1140,7 +1194,11 @@ class JarvisCommandCoordinator(
         if (stepLog.isNotEmpty() && lastPkg.isNotBlank()) {
             localRepo.saveLearnedWorkflow(lastPkg, goal, stepLog.joinToString(" -> "))
         }
-        return "I ran ${stepLog.size} steps on your screen (${stepLog.lastOrNull().orEmpty()}), Sir — let me know if you'd like me to keep going."
+        return stepLog.isNotEmpty() to if (stepLog.isNotEmpty()) {
+            "I ran ${stepLog.size} steps on your screen (${stepLog.lastOrNull().orEmpty()}), Sir — let me know if you'd like me to keep going."
+        } else {
+            "I couldn't complete any verified UI step for \"$goal\", Sir."
+        }
     }
 
     private suspend fun finishDirectReply(
@@ -1169,12 +1227,13 @@ class JarvisCommandCoordinator(
         prompt: String,
         currentSettings: JarvisUserSettings,
         fromVoice: Boolean
-    ): Pair<String, String>? {
+    ): DirectCommandOutcome? {
         val commands = JarvisSystemAssistant.parseCommands(prompt)
         if (commands.isEmpty()) return null
 
         val replies = mutableListOf<String>()
         val labels = mutableListOf<String>()
+        var allSucceeded = true
 
         for ((index, parsed) in commands.withIndex()) {
             if (abortRequested) break
@@ -1186,55 +1245,82 @@ class JarvisCommandCoordinator(
                 totalSteps = commands.size
             )
             val hasMoreSteps = index < commands.lastIndex
-            val stepResult: Pair<String, String>? = when (parsed.kind) {
+            val stepResult: DirectCommandOutcome? = when (parsed.kind) {
                 SystemIntentKind.SWITCH_ACTIVITY_ASSISTANT -> {
                     prefsRepo.setPrimaryActivity(JarvisChoiceActivity.ASSISTANT)
                     localRepo.logAiActivity("ACTIVITY_SWITCH", "System Assistant active")
-                    "Right away, Sir. Ready as your personal assistant and floating screen plugin." to "System Assistant"
+                    DirectCommandOutcome("Right away, Sir. Ready as your personal assistant and floating screen plugin.", "System Assistant")
                 }
                 SystemIntentKind.SWITCH_ACTIVITY_MARKETING -> {
-                    "Certainly, Sir. Just tell me which trading app or website to open in Chrome, or ask me to check market info online and analyze your screen." to "Assistant & Web"
+                    DirectCommandOutcome("Certainly, Sir. Just tell me which trading app or website to open in Chrome, or ask me to check market info online and analyze your screen.", "Assistant & Web")
                 }
                 SystemIntentKind.NAVIGATE_SECTION -> {
                     _navigationEvents.tryEmit(parsed.primaryArg)
-                    "Opening ${parsed.primaryArg.replaceFirstChar { it.uppercase() }}, Sir." to "Navigation"
+                    DirectCommandOutcome("Opening ${parsed.primaryArg.replaceFirstChar { it.uppercase() }}, Sir.", "Navigation")
                 }
-                SystemIntentKind.SWITCH_TO_MINI_ORB -> handleSwitchToMiniOrb()
-                SystemIntentKind.OPEN_FULL_APP -> handleOpenFullApp()
-                SystemIntentKind.ORB_CONTROL -> handleOrbControl(parsed.primaryArg)
+                SystemIntentKind.SWITCH_TO_MINI_ORB -> {
+                    val res = handleSwitchToMiniOrb()
+                    DirectCommandOutcome(res.first, res.second, res.second != "Overlay Permission Needed")
+                }
+                SystemIntentKind.OPEN_FULL_APP -> {
+                    val res = handleOpenFullApp()
+                    DirectCommandOutcome(res.first, res.second)
+                }
+                SystemIntentKind.ORB_CONTROL -> {
+                    val res = handleOrbControl(parsed.primaryArg)
+                    DirectCommandOutcome(res.first, res.second)
+                }
                 SystemIntentKind.MUTE_MIC -> {
                     val mute = parsed.primaryArg == "mute"
                     voiceEngine.setMuted(mute)
-                    (if (mute) "Microphone muted, Sir. Tap Unmute whenever you're ready." else "Microphone unmuted — listening again, Sir.") to "Mic Control"
+                    DirectCommandOutcome(
+                        if (mute) "Microphone muted, Sir." else "Microphone unmuted — listening again, Sir.",
+                        "Mic Control"
+                    )
                 }
                 SystemIntentKind.FLOATING_ORB -> {
-                    if (parsed.primaryArg == "close") {
+                    val res = if (parsed.primaryArg == "close") {
                         handleOrbControl("sleep")
                     } else {
                         handleSwitchToMiniOrb()
                     }
+                    DirectCommandOutcome(res.first, res.second, res.second != "Overlay Permission Needed")
                 }
-                SystemIntentKind.INSTALL_APP -> handleAppInstallDiscovery(parsed.primaryArg)
-                SystemIntentKind.READ_NOTIFICATIONS -> handleReadNotifications(prompt)
+                SystemIntentKind.INSTALL_APP -> {
+                    val res = handleAppInstallDiscovery(parsed.primaryArg)
+                    DirectCommandOutcome(res.first, res.second, res.second == "Play Store")
+                }
+                SystemIntentKind.READ_NOTIFICATIONS -> {
+                    val res = handleReadNotifications(prompt)
+                    DirectCommandOutcome(res.first, res.second, res.second != "Notification Access")
+                }
                 SystemIntentKind.NEWS_RESEARCH -> {
                     _isProcessing.value = true
                     val briefing = newsEngine.fetchBriefing(parsed.primaryArg)
                     _isProcessing.value = false
                     localRepo.logAiActivity("NEWS_RESEARCH", "Fetched ${briefing.topic}")
-                    briefing.headlinesSummary to "Live Briefing"
+                    DirectCommandOutcome(briefing.headlinesSummary, "Live Briefing")
                 }
-                SystemIntentKind.TEXT_CONTACT -> executeCrossPlatformTextFlow(parsed, currentSettings, fromVoice)
-                SystemIntentKind.SOCIAL_ACTION -> executeSocialNavigationFlow(parsed)
+                SystemIntentKind.TEXT_CONTACT -> {
+                    val res = executeCrossPlatformTextFlow(parsed, currentSettings, fromVoice)
+                    val ok = !res.second.contains("Needed", ignoreCase = true) && !res.second.contains("Blocked", ignoreCase = true)
+                    DirectCommandOutcome(res.first, res.second, ok)
+                }
+                SystemIntentKind.SOCIAL_ACTION -> {
+                    val res = executeSocialNavigationFlow(parsed)
+                    val ok = !res.second.contains("Needed", ignoreCase = true)
+                    DirectCommandOutcome(res.first, res.second, ok)
+                }
                 SystemIntentKind.STUDY_DEVICE -> {
                     _autonomousStepStatus.value = "Studying installed apps & patterns..."
                     val report = deviceLearningEngine.studyDeviceNow(force = true)
                     _autonomousStepStatus.value = ""
-                    report.summaryMessage to "Device Study"
+                    DirectCommandOutcome(report.summaryMessage, "Device Study")
                 }
                 SystemIntentKind.VERIFY_VOICE -> {
                     val vRes = voiceEngine.verifyOwnerVoiceBurst()
                     localRepo.logAiActivity("VOICE_ID", vRes.detailMessage)
-                    vRes.detailMessage to "Voice ID"
+                    DirectCommandOutcome(vRes.detailMessage, "Voice ID")
                 }
                 SystemIntentKind.VISUAL_FEEDBACK_TOGGLE -> {
                     val enabled = parsed.secondaryArg == "true"
@@ -1243,7 +1329,7 @@ class JarvisCommandCoordinator(
                         "highlight" -> prefsRepo.setShowHighlightIndicator(enabled)
                         "scroll" -> prefsRepo.setShowScrollIndicator(enabled)
                     }
-                    "Visual ${parsed.primaryArg} indicator turned ${if (enabled) "on" else "off"}, Sir." to "Visual HUD"
+                    DirectCommandOutcome("Visual ${parsed.primaryArg} indicator turned ${if (enabled) "on" else "off"}, Sir.", "Visual HUD")
                 }
                 SystemIntentKind.DAILY_BRIEFING -> {
                     val apps = localRepo.getAllDeviceAppsSnapshot()
@@ -1252,7 +1338,7 @@ class JarvisCommandCoordinator(
                     val learnedBrief = if (apps.isNotEmpty()) {
                         " I've indexed ${apps.size} device apps and ${habits.size} learned habits for you today."
                     } else ""
-                    "$telemetry$learnedBrief How would you like to start, Sir?" to "Daily Briefing"
+                    DirectCommandOutcome("$telemetry$learnedBrief How would you like to start, Sir?", "Daily Briefing")
                 }
                 SystemIntentKind.OPEN_UNKNOWN_WEBSITE -> {
                     _isProcessing.value = true
@@ -1266,66 +1352,104 @@ class JarvisCommandCoordinator(
                             waitForAppForeground(JarvisAccessibilityService.activeInstance(), "chrome", 3600L)
                             delay(300L)
                         }
-                        openRes.replyText to "Chrome Lookup"
+                        DirectCommandOutcome(openRes.replyText, "Chrome Lookup", openRes.launchedTarget)
                     } else {
                         awaitingWebsiteLinkFor = parsed.primaryArg
-                        "I couldn't find the exact website address for \"${parsed.primaryArg}\" online, Sir. Please tell me or paste the link (for example site.com), and I will open it in Chrome right away." to "Link Needed"
+                        DirectCommandOutcome(
+                            "I couldn't find the exact website address for \"${parsed.primaryArg}\" online, Sir. Please tell me or paste the link (for example site.com), and I will open it in Chrome right away.",
+                            "Link Needed",
+                            false
+                        )
                     }
                 }
                 SystemIntentKind.GUIDE_SCREEN -> {
                     val svc = JarvisAccessibilityService.activeInstance()
                     if (svc == null) {
-                        "Turn on Screen Helper on Home or Settings first, Sir, so I can read the screen and guide you step by step (like ID uploads, forms, or trading screens)." to "Screen Helper Needed"
+                        DirectCommandOutcome("Turn on Screen Helper on Home or Settings first, Sir, so I can read the screen and guide you step by step (like ID uploads, forms, or trading screens).", "Screen Helper Needed", false)
                     } else {
                         val guidance = svc.analyzeCurrentFlowStep()
                         if (guidance.stepKind == "GENERAL_SCREEN" && commands.size == 1 && !prompt.lowercase(Locale.US).contains("next step")) {
                             null
                         } else {
                             localRepo.logAiActivity("STEP_GUIDE", "${guidance.stepKind}: guided user on screen")
-                            guidance.spokenGuidance to "Step Guide"
+                            DirectCommandOutcome(guidance.spokenGuidance, "Step Guide")
                         }
                     }
                 }
                 SystemIntentKind.SIGNIN_ASSIST, SystemIntentKind.SIGNUP_ASSIST -> {
                     if (!verifyOwnerLockIfNeeded(currentSettings, fromVoice, "filling saved credentials")) {
-                        "Voiceprint verification didn't match Sir's enrolled voice, so credential autofill stays locked." to "Voice Lock"
+                        DirectCommandOutcome("Voiceprint verification didn't match Sir's enrolled voice, so credential autofill stays locked.", "Voice Lock", false)
                     } else {
                         val exec = JarvisSystemAssistant.execute(context, parsed)
                         if (!exec.handled) null else {
                             localRepo.logAiActivity("SYSTEM_ACTION", "${exec.actionLabel}: ${exec.replyText}")
-                            exec.replyText to exec.actionLabel
+                            DirectCommandOutcome(exec.replyText, exec.actionLabel, exec.launchedTarget)
                         }
                     }
                 }
                 else -> {
+                    val svc = JarvisAccessibilityService.activeInstance()
+                    val beforePkg = svc?.activeForegroundPackage().orEmpty()
                     val exec = JarvisSystemAssistant.execute(context, parsed)
                     if (!exec.handled) null else {
                         localRepo.logAiActivity("SYSTEM_ACTION", "${exec.actionLabel}: ${exec.replyText}")
                         if (parsed.kind == SystemIntentKind.OPEN_APP && exec.launchedTarget) {
                             deviceLearningEngine.recordAppInteraction(parsed.primaryArg)
                         }
-                        if (hasMoreSteps && exec.launchedTarget &&
+                        var verifiedSuccess = exec.launchedTarget || parsed.kind in setOf(
+                            SystemIntentKind.DEVICE_STATUS,
+                            SystemIntentKind.TIME_DATE,
+                            SystemIntentKind.READ_SCREEN,
+                            SystemIntentKind.GUIDE_SCREEN
+                        )
+                        var replyForStep = exec.replyText
+                        var labelForStep = exec.actionLabel
+                        if (exec.launchedTarget &&
                             parsed.kind in setOf(SystemIntentKind.OPEN_APP, SystemIntentKind.OPEN_URL, SystemIntentKind.PLATFORM_SEARCH, SystemIntentKind.WEB_SEARCH)
                         ) {
                             val waitTarget = if (parsed.kind == SystemIntentKind.OPEN_APP) parsed.primaryArg else "chrome"
-                            waitForAppForeground(JarvisAccessibilityService.activeInstance(), waitTarget, 3800L)
-                            delay(320L)
+                            val entered = waitForAppForeground(svc, waitTarget, if (hasMoreSteps) 3800L else 2400L, beforePkg)
+                            if (hasMoreSteps) {
+                                delay(320L)
+                            }
+                            if (svc != null && !entered && parsed.kind == SystemIntentKind.OPEN_APP && !waitTarget.equals("jarvis", ignoreCase = true)) {
+                                verifiedSuccess = false
+                                replyForStep = "I tried opening ${parsed.primaryArg}, Sir, but Android hasn't brought it onto the screen yet (check if your screen is locked or allow Background Pop-up permission for JARVIS)."
+                                labelForStep = "${parsed.primaryArg} Launch Blocked"
+                            }
                         }
-                        exec.replyText to exec.actionLabel
+                        DirectCommandOutcome(replyForStep, labelForStep, verifiedSuccess)
                     }
                 }
             }
 
             if (stepResult != null) {
-                if (stepResult.first.isNotBlank()) replies.add(stepResult.first)
-                if (stepResult.second.isNotBlank()) labels.add(stepResult.second)
+                if (stepResult.reply.isNotBlank()) replies.add(stepResult.reply)
+                if (stepResult.label.isNotBlank()) labels.add(stepResult.label)
+                if (!stepResult.success) allSucceeded = false
             } else if (commands.size == 1) {
                 return null
             }
         }
 
         if (replies.isEmpty()) return null
-        return replies.joinToString(" ") to labels.distinct().joinToString(", ")
+        return DirectCommandOutcome(replies.joinToString(" "), labels.distinct().joinToString(", "), allSucceeded)
+    }
+
+    private fun looksLikeDeviceTaskRequest(prompt: String): Boolean {
+        val lower = prompt.lowercase(Locale.US).trim()
+        val wordCount = lower.split(Regex("\\s+")).size
+        if (wordCount < 2) return false
+        val startsWithQuestion = lower.startsWith("what ") || lower.startsWith("why ") ||
+            lower.startsWith("when ") || lower.startsWith("who ") || lower.startsWith("where ") ||
+            lower.startsWith("how does") || lower.startsWith("how do ") || lower.startsWith("explain ") ||
+            lower.startsWith("tell me about")
+        if (startsWithQuestion && !lower.contains("open ") && !lower.contains("send ") && !lower.contains("tap ")) {
+            return false
+        }
+        return Regex(
+            """\b(open|launch|start|send|text|message|dm|reply|call|dial|tap|click|press|scroll|swipe|type|write|search in|play|pause|stop|mute|unmute|turn on|turn off|enable|disable|install|download|sign me in|sign in|log in|create an account|fill my|check my notifications|read my notifications|go back|go home|take a selfie|take a photo)\b"""
+        ).containsMatchIn(lower)
     }
 
     private fun shouldLookupOnline(prompt: String): Boolean {

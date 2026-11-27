@@ -177,7 +177,7 @@ fun JarvisChatScreen(
                 item {
                     HudGlassCard {
                         Text(
-                            text = "Say \"Hey JARVIS\" or tap Speak below, Sir.",
+                            text = "Always listening — say \"Hey JARVIS\" or speak naturally, Sir.",
                             style = MaterialTheme.typography.titleMedium,
                             color = ArcCyan
                         )

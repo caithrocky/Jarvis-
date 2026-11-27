@@ -95,10 +95,8 @@ class JarvisFloatingOrbService : Service() {
         app.commandCoordinator.orbLifecycle.setOnAutoSleep {
             setExpanded(false)
         }
-        if (intent?.getBooleanExtra(EXTRA_START_LISTEN, false) == true) {
-            if (app.voiceEngine.hasMicPermission() && !app.voiceEngine.isMuted.value) {
-                app.voiceEngine.startSingleCommandCapture(keepConversationLoop = true, playChime = false)
-            }
+        if (app.voiceEngine.hasMicPermission() && !app.voiceEngine.isMuted.value) {
+            app.voiceEngine.ensureAlwaysListeningStandby()
         }
         return START_STICKY
     }
@@ -189,12 +187,10 @@ class JarvisFloatingOrbService : Service() {
                         val nextExpand = !isExpanded
                         setExpanded(nextExpand)
                         app.commandCoordinator.orbLifecycle.touchActivity()
-                        if (nextExpand &&
-                            !app.voiceEngine.isMuted.value &&
-                            app.voiceEngine.phase.value != VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE &&
-                            app.voiceEngine.hasMicPermission()
-                        ) {
-                            app.voiceEngine.startSingleCommandCapture(keepConversationLoop = true, playChime = false)
+                        if (app.voiceEngine.phase.value == VoicePipelinePhase.SPEAKING_RESPONSE) {
+                            app.voiceEngine.interruptSpeech()
+                        } else if (!app.voiceEngine.isMuted.value && app.voiceEngine.hasMicPermission()) {
+                            app.voiceEngine.ensureAlwaysListeningStandby()
                         }
                     }
                     true
@@ -311,23 +307,18 @@ class JarvisFloatingOrbService : Service() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        val speakBtn = createMiniButton("Listen") {
+        val speakBtn = createMiniButton("Voice Ready") {
             app.commandCoordinator.orbLifecycle.touchActivity()
-            when (app.voiceEngine.phase.value) {
-                VoicePipelinePhase.SPEAKING_RESPONSE -> {
+            when {
+                app.voiceEngine.phase.value == VoicePipelinePhase.SPEAKING_RESPONSE -> {
                     app.voiceEngine.interruptSpeech()
-                    if (app.voiceEngine.hasMicPermission()) {
-                        app.voiceEngine.startSingleCommandCapture(keepConversationLoop = true)
-                    }
+                    app.voiceEngine.ensureAlwaysListeningStandby()
                 }
-                VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE -> {
-                    app.voiceEngine.startAlwaysOnWakeWordLoop()
+                app.voiceEngine.isMuted.value -> {
+                    app.voiceEngine.setMuted(false)
+                    app.voiceEngine.ensureAlwaysListeningStandby()
                 }
-                else -> {
-                    if (app.voiceEngine.hasMicPermission()) {
-                        app.voiceEngine.startSingleCommandCapture(keepConversationLoop = true, playChime = false)
-                    }
-                }
+                else -> app.voiceEngine.ensureAlwaysListeningStandby()
             }
         }
         val muteBtn = createMiniButton("Mute", bgColor = Color.argb(190, 68, 56, 128)) {
@@ -507,8 +498,8 @@ class JarvisFloatingOrbService : Service() {
 
                 speakBtn.text = when (v.phase) {
                     VoicePipelinePhase.SPEAKING_RESPONSE -> "Interrupt"
-                    VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE -> "Pause"
-                    else -> "Listen"
+                    VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE -> "Listening"
+                    else -> if (v.isMuted) "Resume" else "Auto Mic"
                 }
                 muteBtn.text = if (v.isMuted) "Unmute" else "Mute"
 

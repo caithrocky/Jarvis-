@@ -486,4 +486,16 @@ class JarvisEngineUnitTest {
         assertEquals(SystemIntentKind.OPEN_CAMERA, actions[5].kind)
         assertEquals("selfie", actions[5].primaryArg)
     }
+
+    @Test
+    fun `voice catalog exposes seven distinct Magpie neural voices`() {
+        val voices = com.example.domain.model.VoicePersonality.entries
+        assertEquals(7, voices.size)
+        assertEquals(7, voices.map { it.nimVoiceName }.distinct().size)
+        assertEquals(7, voices.map { it.label }.distinct().size)
+        voices.forEach { voice ->
+            assertTrue(voice.label.isNotBlank())
+            assertTrue(voice.nimVoiceName.startsWith("Magpie-Multilingual.EN-US."))
+        }
+    }
 }

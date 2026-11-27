@@ -366,9 +366,13 @@ enum class VoicePersonality(
     val rate: Float,
     val nimVoiceName: String
 ) {
-    JARVIS_CLASSIC("JARVIS Classic (Leo)", 0.88f, 1.02f, "Magpie-Multilingual.EN-US.Leo"),
-    ANALYST_CRISP("Quant Brief (Jason)", 0.94f, 1.12f, "Magpie-Multilingual.EN-US.Jason"),
-    CALM_MENTOR("Executive (Aria)", 0.96f, 0.96f, "Magpie-Multilingual.EN-US.Aria")
+    JARVIS_CLASSIC("Leo • Classic JARVIS", 0.88f, 1.02f, "Magpie-Multilingual.EN-US.Leo"),
+    LEO_CALM("Leo • Composed (Calm)", 0.86f, 0.98f, "Magpie-Multilingual.EN-US.Leo.Calm"),
+    ANALYST_CRISP("Jason • Sharp Brief", 0.94f, 1.10f, "Magpie-Multilingual.EN-US.Jason"),
+    JASON_CALM("Jason • Calm Strategist", 0.92f, 1.00f, "Magpie-Multilingual.EN-US.Jason.Calm"),
+    CALM_MENTOR("Aria • Executive", 0.96f, 0.98f, "Magpie-Multilingual.EN-US.Aria"),
+    SOFIA_WARM("Sofia • Warm Natural", 0.98f, 1.00f, "Magpie-Multilingual.EN-US.Sofia"),
+    MIA_BRIGHT("Mia • Bright Expressive", 1.00f, 1.03f, "Magpie-Multilingual.EN-US.Mia.Happy")
 }
 
 data class ApiIntegrationStatus(

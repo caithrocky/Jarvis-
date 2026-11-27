@@ -307,7 +307,7 @@ fun HomeDashboardScreen(
                     if (!hasMicPermission) {
                         Spacer(modifier = Modifier.height(14.dp))
                         Text(
-                            text = "Tap the orb or voice button to allow microphone access",
+                            text = "Allow microphone access for automatic voice activation",
                             style = MaterialTheme.typography.bodySmall,
                             color = SoftViolet.copy(alpha = 0.9f),
                             textAlign = TextAlign.Center,
@@ -370,9 +370,9 @@ fun HomeDashboardScreen(
                             !hasMicPermission -> "Allow microphone for automatic voice..."
                             uiState.isMicMuted -> "Microphone muted — tap to resume..."
                             uiState.orbState == OrbState.LISTENING -> "Listening — speak now..."
-                            uiState.orbState == OrbState.SPEAKING -> "Speaking — tap to interrupt..."
+                            uiState.orbState == OrbState.SPEAKING -> "Speaking — say stop or tap..."
                             settings.wakeWordEnabled -> "Always listening — say \"Hey Jarvis\"..."
-                            else -> "Voice standby — tap to listen..."
+                            else -> "Voice standby..."
                         },
                         style = MaterialTheme.typography.bodyLarge.copy(
                             fontSize = 16.sp,

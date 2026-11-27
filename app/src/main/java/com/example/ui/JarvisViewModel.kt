@@ -302,37 +302,6 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun saveNvidiaNimKeyOverride(rawKey: String) {
-        val cleaned = SecretsConfig.cleanSecret(rawKey)
-        if (cleaned.isNullOrBlank()) {
-            _uiState.update {
-                it.copy(snackbarMessage = "Enter a valid NVIDIA NIM API key (for example starting with nvapi-).")
-            }
-            return
-        }
-        credentialStore.putEncrypted(SecureCredentialStore.KEY_NVIDIA_NIM_API_OVERRIDE, cleaned)
-        _uiState.update {
-            it.copy(
-                hasRuntimeNvidiaKeyOverride = true,
-                snackbarMessage = "Encrypted NVIDIA NIM key saved on device (persists across app updates)."
-            )
-        }
-        refreshApiStatuses()
-        testNvidiaNimConnection()
-    }
-
-    fun clearNvidiaNimKeyOverride() {
-        credentialStore.remove(SecureCredentialStore.KEY_NVIDIA_NIM_API_OVERRIDE)
-        _uiState.update {
-            it.copy(
-                hasRuntimeNvidiaKeyOverride = false,
-                nimReachable = null,
-                snackbarMessage = "Device-stored NVIDIA NIM key cleared."
-            )
-        }
-        refreshApiStatuses()
-    }
-
     fun toggleMicMute() {
         val mutedNow = voiceEngine.toggleMute()
         _uiState.update {
@@ -362,19 +331,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
         if (!hasMicPermission) {
             _uiState.update {
-                it.copy(snackbarMessage = "Grant Microphone permission to talk with JARVIS.")
+                it.copy(snackbarMessage = "Grant Microphone permission so JARVIS can listen automatically.")
             }
             return
         }
-        if (currentPhase == VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE) {
-            if (settings.value.wakeWordEnabled) {
-                voiceEngine.startAlwaysOnWakeWordLoop()
-            } else {
-                voiceEngine.stopAllListening()
-            }
-        } else {
-            voiceEngine.startSingleCommandCapture()
-        }
+        voiceEngine.ensureAlwaysListeningStandby()
     }
 
     fun toggleAlwaysOnVoice(enabled: Boolean) {
@@ -480,7 +441,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         JarvisFloatingOrbService.start(
             app,
             expandBubble = true,
-            startListening = voiceEngine.hasMicPermission()
+            startListening = false
         )
         _uiState.update { it.copy(snackbarMessage = "Voice-first floating orb launched over screen.") }
     }
@@ -686,11 +647,10 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 configured = SecretsConfig.hasNvidiaNim,
                 reachable = state.nimReachable,
                 statusText = when {
-                    SecretsConfig.hasBuildConfigNvidiaNim -> "API Key Loaded (BuildConfig)"
-                    SecretsConfig.hasNvidiaNim -> "API Key Loaded (Encrypted Device Vault)"
-                    else -> "Key Not Configured"
+                    SecretsConfig.hasNvidiaNim -> "Configured in App Build Secrets"
+                    else -> "NIM Key Missing (Set in Secrets)"
                 },
-                obtainGuide = "Generate a key at build.nvidia.com and save it in AI Studio Secrets or the Encrypted Device Fallback above.",
+                obtainGuide = "Configured permanently via NVIDIA_NIM_API_KEY in AI Studio Secrets / build environment.",
                 secretKeys = listOf("NVIDIA_NIM_API_KEY")
             )
         )

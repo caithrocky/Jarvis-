@@ -6,7 +6,7 @@ import android.accessibilityservice.GestureDescription
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.pm.PackageManager
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Path
 import android.graphics.Rect
@@ -16,13 +16,12 @@ import android.text.InputType
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
-import androidx.core.content.ContextCompat
 import com.example.JarvisApplication
 import com.example.security.SecureCredentialStore
-import com.example.voice.JarvisVoiceService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -71,47 +70,62 @@ class JarvisAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        overlayManager = JarvisVisualOverlayManager(this).apply {
-            showTapEnabled = desiredShowTap
-            showHighlightEnabled = desiredShowHighlight
-            showScrollEnabled = desiredShowScroll
-        }
         _isConnected.value = true
 
-        // Built-in OS plugin resilience: ensure always-on wake-word listener runs whenever enabled
-        serviceScope.launch {
-            val app = applicationContext as? JarvisApplication ?: return@launch
-            val settings = runCatching { app.preferencesRepository.settingsFlow.first() }.getOrNull() ?: return@launch
-            applyVisualFeedbackSettings(
-                showTap = settings.showTapIndicator,
-                showHighlight = settings.showHighlightIndicator,
-                showScroll = settings.showScrollIndicator
-            )
-            val hasMic = ContextCompat.checkSelfPermission(
-                applicationContext,
-                Manifest.permission.RECORD_AUDIO
-            ) == PackageManager.PERMISSION_GRANTED
-            if (settings.wakeWordEnabled && hasMic && !app.voiceEngine.isMuted.value) {
-                JarvisVoiceService.start(applicationContext)
+        runCatching {
+            overlayManager = JarvisVisualOverlayManager(this).apply {
+                showTapEnabled = desiredShowTap
+                showHighlightEnabled = desiredShowHighlight
+                showScrollEnabled = desiredShowScroll
+            }
+        }
+
+        // Load only visual indicator preferences cleanly; voice foreground service is managed safely by Activity/Boot/Alarm
+        serviceScope.launch(Dispatchers.IO) {
+            runCatching {
+                val app = applicationContext as? JarvisApplication ?: return@launch
+                val settings = app.preferencesRepository.settingsFlow.first()
+                applyVisualFeedbackSettings(
+                    showTap = settings.showTapIndicator,
+                    showHighlight = settings.showHighlightIndicator,
+                    showScroll = settings.showScrollIndicator
+                )
             }
         }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        event?.packageName?.toString()?.takeIf { it.isNotBlank() }?.let { pkg ->
-            if (pkg != packageName) {
-                _activePackageName.value = pkg
+        runCatching {
+            event?.packageName?.toString()?.takeIf { it.isNotBlank() }?.let { pkg ->
+                if (pkg != packageName) {
+                    _activePackageName.value = pkg
+                }
             }
         }
     }
 
     override fun onInterrupt() {
-        overlayManager?.clearOverlays()
+        runCatching { overlayManager?.clearOverlays() }
+    }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        runCatching {
+            overlayManager?.detach()
+            overlayManager = null
+        }
+        if (instance === this) {
+            instance = null
+        }
+        _isConnected.value = false
+        return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
-        overlayManager?.detach()
-        overlayManager = null
+        runCatching {
+            overlayManager?.detach()
+            overlayManager = null
+        }
+        runCatching { serviceScope.cancel() }
         if (instance === this) {
             instance = null
         }

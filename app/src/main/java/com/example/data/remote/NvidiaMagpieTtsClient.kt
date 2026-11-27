@@ -38,62 +38,57 @@ class NvidiaMagpieTtsClient(private val httpClient: OkHttpClient) {
         }
 
         runCatching {
-            val body = MultipartBody.Builder()
-                .setType(MultipartBody.FORM)
-                .addFormDataPart("text", cleanText)
-                .addFormDataPart("language", "en-US")
-                .addFormDataPart("voice", personality.nimVoiceName)
-                .addFormDataPart("encoding", "LINEAR_PCM")
-                .addFormDataPart("sample_rate_hz", DEFAULT_SAMPLE_RATE.toString())
-                .build()
+            val primaryVoice = personality.nimVoiceName
+            val firstTry = executeSynthesizeCall(key, cleanText, primaryVoice)
+            if (firstTry.isSuccess) return@runCatching firstTry.getOrThrow()
 
-            val request = Request.Builder()
-                .url(MAGPIE_NVCF_SYNTHESIZE_URL)
-                .header("Authorization", "Bearer $key")
-                .post(body)
-                .build()
-
-            httpClient.newCall(request).execute().use { resp ->
-                val rawBytes = resp.body?.bytes() ?: ByteArray(0)
-                if (!resp.isSuccessful) {
-                    val errPreview = rawBytes.decodeToString().take(200)
-                    error("Magpie TTS HTTP ${resp.code}: $errPreview")
-                }
-                if (rawBytes.isEmpty()) {
-                    error("Magpie TTS returned empty audio")
-                }
-                parseWavOrRawPcm(rawBytes)
+            // If an .Emotion suffix (4+ parts) was rejected by a container revision, retry base speaker name
+            val segments = primaryVoice.split('.')
+            if (segments.size > 3) {
+                val baseVoice = segments.take(3).joinToString(".")
+                val baseTry = executeSynthesizeCall(key, cleanText, baseVoice)
+                if (baseTry.isSuccess) return@runCatching baseTry.getOrThrow()
             }
+            firstTry.getOrThrow()
+        }
+    }
+
+    private fun executeSynthesizeCall(key: String, cleanText: String, voiceName: String): Result<SynthesizedAudio> = runCatching {
+        val body = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart("text", cleanText)
+            .addFormDataPart("language", "en-US")
+            .addFormDataPart("voice", voiceName)
+            .addFormDataPart("encoding", "LINEAR_PCM")
+            .addFormDataPart("sample_rate_hz", DEFAULT_SAMPLE_RATE.toString())
+            .build()
+
+        val request = Request.Builder()
+            .url(MAGPIE_NVCF_SYNTHESIZE_URL)
+            .header("Authorization", "Bearer $key")
+            .post(body)
+            .build()
+
+        httpClient.newCall(request).execute().use { resp ->
+            val rawBytes = resp.body?.bytes() ?: ByteArray(0)
+            if (!resp.isSuccessful) {
+                val errPreview = rawBytes.decodeToString().take(200)
+                error("Magpie TTS HTTP ${resp.code}: $errPreview")
+            }
+            if (rawBytes.isEmpty()) {
+                error("Magpie TTS returned empty audio")
+            }
+            parseWavOrRawPcm(rawBytes)
         }
     }
 
     suspend fun testTtsConnection(personality: VoicePersonality): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         val key = SecretsConfig.nvidiaNimApiKey
             ?: return@withContext false to "NVIDIA_NIM_API_KEY missing"
-        runCatching {
-            val body = MultipartBody.Builder()
-                .setType(MultipartBody.FORM)
-                .addFormDataPart("text", "Systems online, Sir.")
-                .addFormDataPart("language", "en-US")
-                .addFormDataPart("voice", personality.nimVoiceName)
-                .addFormDataPart("encoding", "LINEAR_PCM")
-                .addFormDataPart("sample_rate_hz", DEFAULT_SAMPLE_RATE.toString())
-                .build()
-            val req = Request.Builder()
-                .url(MAGPIE_NVCF_SYNTHESIZE_URL)
-                .header("Authorization", "Bearer $key")
-                .post(body)
-                .build()
-            httpClient.newCall(req).execute().use { resp ->
-                if (resp.isSuccessful) {
-                    true to "Magpie TTS active (${personality.nimVoiceName})"
-                } else {
-                    false to "Magpie TTS HTTP ${resp.code}"
-                }
-            }
-        }.getOrElse {
-            false to "Magpie TTS error: ${it.message ?: "Network error"}"
-        }
+        synthesize("Systems online, Sir.", personality).fold(
+            onSuccess = { true to "Magpie TTS active (${personality.label})" },
+            onFailure = { false to (it.message ?: "Magpie TTS error") }
+        )
     }
 
     internal fun parseWavOrRawPcm(bytes: ByteArray): SynthesizedAudio {
