@@ -342,7 +342,7 @@ fun SettingsScreen(
                     text = if (uiState.hasBuildConfigNvidiaKey || uiState.hasRuntimeNvidiaKeyOverride) {
                         "NVIDIA NIM & Magpie Voice Status: Key Active"
                     } else {
-                        "NVIDIA NIM Key Not Bound — provide your NVIDIA NIM API key to embed permanently in JARVIS Secrets."
+                        "NVIDIA NIM Key Not In This APK — add NVIDIA_NIM_API_KEY in AI Studio Secrets and reinstall the new APK (or add it to GitHub Repo Actions Secrets for GitHub Releases)."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = if (uiState.hasBuildConfigNvidiaKey || uiState.hasRuntimeNvidiaKeyOverride) ProfitEmerald else WarningAmber

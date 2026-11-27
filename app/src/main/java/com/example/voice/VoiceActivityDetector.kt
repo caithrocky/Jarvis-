@@ -35,18 +35,20 @@ data class WakeEvalResult(
  */
 object ContextualWakeDetector {
 
+    private val wakeNamePattern = "(?:jarvis|jervis|jarves|jarvy)"
+
     private val directGreetingRegex = Regex(
-        "^(?:.*\\b)?(hey|ok|okay|hi|hello|yo)\\s+jarvis\\b[:,.!?\\s]*(.*)$",
+        "^(?:.*\\b)?(hey|ok|okay|hi|hello|yo)\\s+$wakeNamePattern\\b[:,.!?\\s]*(.*)$",
         RegexOption.IGNORE_CASE
     )
 
     private val leadNameDirectRegex = Regex(
-        "^jarvis\\s*(?:,|\\.|:|\\s+)\\s*(.*)$",
+        "^$wakeNamePattern\\s*(?:,|\\.|:|\\s+)\\s*(.*)$",
         RegexOption.IGNORE_CASE
     )
 
     private val trailingDirectRegex = Regex(
-        "^(.+?),\\s*jarvis[.!?]*$",
+        "^(.+?),\\s*$wakeNamePattern[.!?]*$",
         RegexOption.IGNORE_CASE
     )
 
@@ -75,7 +77,8 @@ object ContextualWakeDetector {
         if (trimmed.isBlank()) return WakeEvalResult(WakeIntent.NONE, "")
         val lower = trimmed.lowercase(Locale.US)
 
-        if (!lower.contains("jarvis") && !lower.contains("hey service")) {
+        val hasWakeName = Regex("\\b$wakeNamePattern\\b").containsMatchIn(lower)
+        if (!hasWakeName && !lower.contains("hey service")) {
             return WakeEvalResult(WakeIntent.NONE, "")
         }
 
@@ -92,7 +95,8 @@ object ContextualWakeDetector {
         }
 
         // Standalone "Jarvis"
-        if (lower.replace(Regex("[.!?,:]"), "").trim() == "jarvis") {
+        val strippedName = lower.replace(Regex("[.!?,:]"), "").trim()
+        if (strippedName in setOf("jarvis", "jervis", "jarves", "jarvy")) {
             return WakeEvalResult(WakeIntent.DIRECT_WAKE, "")
         }
 

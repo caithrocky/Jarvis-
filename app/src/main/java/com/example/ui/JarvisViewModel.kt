@@ -790,9 +790,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 reachable = state.nimReachable,
                 statusText = when {
                     SecretsConfig.hasNvidiaNim -> "Configured in App Build Secrets"
-                    else -> "NIM Key Missing (Set in Secrets)"
+                    else -> "Missing in This APK Build (Rebuild Required)"
                 },
-                obtainGuide = "Configured permanently via NVIDIA_NIM_API_KEY in AI Studio Secrets / build environment.",
+                obtainGuide = "Set NVIDIA_NIM_API_KEY in AI Studio Secrets and reinstall the rebuilt APK, or add NVIDIA_NIM_API_KEY to GitHub Repo Actions Secrets for GitHub Releases.",
                 secretKeys = listOf("NVIDIA_NIM_API_KEY")
             )
         )

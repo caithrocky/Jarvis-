@@ -552,11 +552,21 @@ class JarvisEngineUnitTest {
     }
 
     @Test
-    fun `offline assistant engine evaluates math deterministically without internet`() {
+    fun `offline assistant engine evaluates math and greets locally including stt variants`() {
         assertEquals("25 * 4 = 100", com.example.assistant.OfflineAssistantEngine.tryEvaluateMath("what is 25 times 4"))
         assertEquals("15% of 200 is 30", com.example.assistant.OfflineAssistantEngine.tryEvaluateMath("calculate 15% of 200"))
         assertEquals("Division by zero is undefined", com.example.assistant.OfflineAssistantEngine.tryEvaluateMath("10 / 0"))
         assertNull(com.example.assistant.OfflineAssistantEngine.tryEvaluateMath("explain quantum entanglement"))
+
+        assertTrue(com.example.assistant.OfflineAssistantEngine.canHandleLocally("hello Jerry", emptyList(), null))
+        assertTrue(com.example.assistant.OfflineAssistantEngine.canHandleLocally("Hey Jarvis!", emptyList(), null))
+        assertTrue(com.example.assistant.OfflineAssistantEngine.canHandleLocally("what is 12 + 8", emptyList(), null))
+        assertTrue(com.example.assistant.OfflineAssistantEngine.canHandleLocally("what time is it", emptyList(), null))
+        assertTrue(com.example.assistant.OfflineAssistantEngine.canHandleLocally("read my screen", emptyList(), "WhatsApp open"))
+        assertEquals(
+            false,
+            com.example.assistant.OfflineAssistantEngine.canHandleLocally("summarize quantum field theory", emptyList(), null)
+        )
     }
 
     @Test

@@ -117,7 +117,7 @@ class NvidiaNimClient(private val httpClient: OkHttpClient) {
 
         if (nimKey == null && (supabaseUrl == null || supabaseKey == null)) {
             return@withContext JarvisAiResult.ConfigurationRequired(
-                "NVIDIA NIM API key is not configured yet. Add NVIDIA_NIM_API_KEY (from build.nvidia.com) in AI Studio Secrets, or configure SUPABASE_URL + SUPABASE_ANON_KEY to proxy requests server-side."
+                "NVIDIA NIM API key isn't bundled in this APK build yet. After adding NVIDIA_NIM_API_KEY in AI Studio Secrets, rebuild & reinstall the APK—or if installing from GitHub Releases, add NVIDIA_NIM_API_KEY to GitHub Repository Secrets (Settings → Secrets and variables → Actions)."
             )
         }
 

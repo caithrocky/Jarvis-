@@ -95,6 +95,17 @@ class AssistantModeBehaviorTest {
         val casual = ContextualWakeDetector.evaluate("I think Jarvis we need to find a better way to do this")
         assertEquals(WakeIntent.CASUAL_MENTION, casual.intent)
 
+        val phoneticWake = ContextualWakeDetector.evaluate("Hey Jervis")
+        assertEquals(WakeIntent.DIRECT_WAKE, phoneticWake.intent)
+        assertEquals("", phoneticWake.remainder)
+
+        val phoneticCmd = ContextualWakeDetector.evaluate("Okay Jarvy, open Spotify")
+        assertEquals(WakeIntent.DIRECT_WAKE, phoneticCmd.intent)
+        assertEquals("open Spotify", phoneticCmd.remainder)
+
+        // Do not false-wake on unrelated personal names like Jerry
+        assertEquals(WakeIntent.NONE, ContextualWakeDetector.evaluate("Hey Jerry, pass the salt").intent)
+
         assertTrue(ContextualWakeDetector.isBargeInCommand("Wait"))
         assertTrue(ContextualWakeDetector.isBargeInCommand("Stop"))
         assertTrue(ContextualWakeDetector.isBargeInCommand("Hold on"))

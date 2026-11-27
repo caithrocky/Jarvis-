@@ -720,20 +720,34 @@ class JarvisCommandCoordinator(
                 }
                 is JarvisAiResult.ConfigurationRequired -> {
                     val onlineFallback = webResult?.formatForUserReply().orEmpty()
-                    replyText = if (onlineFallback.isNotBlank()) {
-                        "From the internet, Sir: $onlineFallback"
+                    if (OfflineAssistantEngine.canHandleLocally(prompt, memories, screenSummary)) {
+                        val (offReply, offTag) = OfflineAssistantEngine.answerOffline(
+                            context = context,
+                            prompt = prompt,
+                            memories = memories,
+                            learnedApps = localRepo.getAllDeviceAppsSnapshot(),
+                            learnedWorkflows = localRepo.getTopWorkflows(),
+                            screenSummary = screenSummary
+                        )
+                        replyText = "$offReply (Cloud AI & Magpie voice aren't bundled in this APK build yet — reinstall from AI Studio or add NVIDIA_NIM_API_KEY to GitHub Secrets.)"
+                        toolSummary = "$offTag • NIM Setup Needed"
+                    } else if (onlineFallback.isNotBlank()) {
+                        replyText = "From the internet, Sir: $onlineFallback"
+                        toolSummary = "Internet Search"
                     } else {
                         taskFailed = true
-                        result.message
+                        replyText = result.message
+                        toolSummary = "Setup Needed"
                     }
-                    toolSummary = if (onlineFallback.isNotBlank()) "Internet Search" else "Setup Needed"
                 }
                 is JarvisAiResult.Error -> {
                     val onlineFallback = webResult?.formatForUserReply().orEmpty()
                     if (onlineFallback.isNotBlank()) {
                         replyText = "I had trouble reaching NVIDIA NIM, Sir, so I pulled this straight from the web: $onlineFallback"
                         toolSummary = "Internet Fallback"
-                    } else if (!OfflineAssistantEngine.isNetworkConnected(context)) {
+                    } else if (!OfflineAssistantEngine.isNetworkConnected(context) ||
+                        OfflineAssistantEngine.canHandleLocally(prompt, memories, screenSummary)
+                    ) {
                         val (offReply, offTag) = OfflineAssistantEngine.answerOffline(
                             context = context,
                             prompt = prompt,
