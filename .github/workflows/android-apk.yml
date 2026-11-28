@@ -83,24 +83,12 @@ jobs:
       - name: Generate .env from GitHub Secrets
         env:
           NVIDIA_NIM_API_KEY: ${{ secrets.NVIDIA_NIM_API_KEY }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-          DERIV_APP_ID: ${{ secrets.DERIV_APP_ID }}
-          DERIV_API_TOKEN: ${{ secrets.DERIV_API_TOKEN }}
-          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
-          BINANCE_API_SECRET: ${{ secrets.BINANCE_API_SECRET }}
-          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-          MT_BRIDGE_URL: ${{ secrets.MT_BRIDGE_URL }}
-          MT_BRIDGE_TOKEN: ${{ secrets.MT_BRIDGE_TOKEN }}
         run: |
           : > .env
-          for key in NVIDIA_NIM_API_KEY SUPABASE_URL SUPABASE_ANON_KEY DERIV_APP_ID DERIV_API_TOKEN BINANCE_API_KEY BINANCE_API_SECRET FINNHUB_API_KEY MT_BRIDGE_URL MT_BRIDGE_TOKEN; do
-            val="${!key}"
-            if [ -n "$val" ]; then
-              printf '%s=%s\n' "$key" "$val" >> .env
-              echo "Configured $key from GitHub Secrets"
-            fi
-          done
+          if [ -n "$NVIDIA_NIM_API_KEY" ]; then
+            printf 'NVIDIA_NIM_API_KEY=%s\n' "$NVIDIA_NIM_API_KEY" >> .env
+            echo "Configured NVIDIA_NIM_API_KEY from GitHub Secrets"
+          fi
 
       - name: Build Jarvis debug APK
         run: gradle --no-daemon --stacktrace :app:assembleDebug

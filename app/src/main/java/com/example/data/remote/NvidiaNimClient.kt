@@ -58,13 +58,9 @@ class NvidiaNimClient(private val httpClient: OkHttpClient) {
     suspend fun testConnection(modelId: String): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         val resolvedModel = AiModelOption.normalizeModelId(modelId)
         val key = SecretsConfig.nvidiaNimApiKey
-        val supabaseUrl = SecretsConfig.supabaseUrl
-        val supabaseKey = SecretsConfig.supabaseAnonKey
-        if (key == null && (supabaseUrl == null || supabaseKey == null)) {
-            return@withContext false to "NVIDIA_NIM_API_KEY not configured in AI Studio Secrets."
-        }
+            ?: return@withContext false to "NVIDIA_NIM_API_KEY not configured in AI Studio Secrets."
         runCatching {
-            val endpoint = resolveEndpoint(key, supabaseUrl, supabaseKey)
+            val endpoint = NVIDIA_NIM_CHAT_URL
             val payload = buildChatPayload(
                 modelId = resolvedModel,
                 messagesArray = JSONArray().put(JSONObject().put("role", "user").put("content", "Reply OK.")),
@@ -72,7 +68,7 @@ class NvidiaNimClient(private val httpClient: OkHttpClient) {
                 stream = false,
                 includeNemotronTemplateKwargs = resolvedModel.contains("nemotron-3.5", ignoreCase = true)
             )
-            executeRequest(endpoint, payload, key, supabaseKey, acceptSse = false).use { resp ->
+            executeRequest(endpoint, payload, key, acceptSse = false).use { resp ->
                 val rawBody = resp.body?.string().orEmpty()
                 if (resp.isSuccessful) {
                     true to "Connected to NVIDIA NIM ($resolvedModel)"
@@ -85,7 +81,7 @@ class NvidiaNimClient(private val httpClient: OkHttpClient) {
                         stream = false,
                         includeNemotronTemplateKwargs = false
                     )
-                    executeRequest(endpoint, fallbackPayload, key, supabaseKey, acceptSse = false).use { retryResp ->
+                    executeRequest(endpoint, fallbackPayload, key, acceptSse = false).use { retryResp ->
                         val retryBody = retryResp.body?.string().orEmpty()
                         if (retryResp.isSuccessful) {
                             true to "Connected to NVIDIA NIM ($resolvedModel)"
@@ -112,16 +108,14 @@ class NvidiaNimClient(private val httpClient: OkHttpClient) {
     ): JarvisAiResult = withContext(Dispatchers.IO) {
         val resolvedModel = AiModelOption.normalizeModelId(modelId)
         val nimKey = SecretsConfig.nvidiaNimApiKey
-        val supabaseUrl = SecretsConfig.supabaseUrl
-        val supabaseKey = SecretsConfig.supabaseAnonKey
 
-        if (nimKey == null && (supabaseUrl == null || supabaseKey == null)) {
+        if (nimKey == null) {
             return@withContext JarvisAiResult.ConfigurationRequired(
                 "NVIDIA NIM API key isn't bundled in this APK build yet. After adding NVIDIA_NIM_API_KEY in AI Studio Secrets, rebuild & reinstall the APK—or if installing from GitHub Releases, add NVIDIA_NIM_API_KEY to GitHub Repository Secrets (Settings → Secrets and variables → Actions)."
             )
         }
 
-        val endpoint = resolveEndpoint(nimKey, supabaseUrl, supabaseKey)
+        val endpoint = NVIDIA_NIM_CHAT_URL
         val messagesArray = buildMessagesArray(userPrompt, history, memories, snapshot)
 
         runCatching {
@@ -138,7 +132,6 @@ class NvidiaNimClient(private val httpClient: OkHttpClient) {
                 endpoint = endpoint,
                 payload = primaryPayload,
                 nimKey = nimKey,
-                supabaseKey = supabaseKey,
                 onPartialToken = onPartialToken
             )
 
@@ -156,7 +149,6 @@ class NvidiaNimClient(private val httpClient: OkHttpClient) {
                         endpoint = endpoint,
                         payload = plainPayload,
                         nimKey = nimKey,
-                        supabaseKey = supabaseKey,
                         onPartialToken = onPartialToken
                     )
                 }
@@ -172,7 +164,6 @@ class NvidiaNimClient(private val httpClient: OkHttpClient) {
                         endpoint = endpoint,
                         payload = nonStreamPayload,
                         nimKey = nimKey,
-                        supabaseKey = supabaseKey,
                         onPartialToken = onPartialToken
                     )
                 }
@@ -214,12 +205,11 @@ class NvidiaNimClient(private val httpClient: OkHttpClient) {
     private fun executeStreamingOrJsonCall(
         endpoint: String,
         payload: JSONObject,
-        nimKey: String?,
-        supabaseKey: String?,
+        nimKey: String,
         onPartialToken: (String) -> Unit
     ): CallOutcome {
         val wantStream = payload.optBoolean("stream", false)
-        executeRequest(endpoint, payload, nimKey, supabaseKey, acceptSse = wantStream).use { resp ->
+        executeRequest(endpoint, payload, nimKey, acceptSse = wantStream).use { resp ->
             val contentType = resp.header("Content-Type").orEmpty().lowercase()
             if (!resp.isSuccessful) {
                 val errBody = resp.body?.string().orEmpty()
@@ -284,14 +274,6 @@ class NvidiaNimClient(private val httpClient: OkHttpClient) {
         }
     }
 
-    private fun resolveEndpoint(nimKey: String?, supabaseUrl: String?, supabaseKey: String?): String {
-        return if (nimKey == null && supabaseUrl != null && supabaseKey != null) {
-            "$supabaseUrl/functions/v1/jarvis-chat"
-        } else {
-            "https://integrate.api.nvidia.com/v1/chat/completions"
-        }
-    }
-
     private fun buildChatPayload(
         modelId: String,
         messagesArray: JSONArray,
@@ -315,22 +297,19 @@ class NvidiaNimClient(private val httpClient: OkHttpClient) {
     private fun executeRequest(
         endpoint: String,
         payload: JSONObject,
-        nimKey: String?,
-        supabaseKey: String?,
+        nimKey: String,
         acceptSse: Boolean
     ): okhttp3.Response {
         val reqBuilder = Request.Builder()
             .url(endpoint)
             .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .header("Accept", if (acceptSse) "text/event-stream" else "application/json")
-
-        if (nimKey != null) {
-            reqBuilder.header("Authorization", "Bearer $nimKey")
-        } else if (supabaseKey != null) {
-            reqBuilder.header("apikey", supabaseKey)
-            reqBuilder.header("Authorization", "Bearer $supabaseKey")
-        }
+            .header("Authorization", "Bearer $nimKey")
         return httpClient.newCall(reqBuilder.build()).execute()
+    }
+
+    companion object {
+        private const val NVIDIA_NIM_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
     }
 
     internal fun extractTokenFromSseChunk(dataJson: String): String? {

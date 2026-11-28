@@ -28,9 +28,6 @@ class ExampleRobolectricTest {
         if (BuildConfig.NVIDIA_NIM_API_KEY.startsWith("MY_")) {
             assertFalse(SecretsConfig.hasNvidiaNim)
         }
-        if (BuildConfig.BINANCE_API_KEY.startsWith("MY_")) {
-            assertFalse(SecretsConfig.hasBinanceAuth)
-        }
     }
 
     @Test
