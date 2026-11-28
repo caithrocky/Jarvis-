@@ -101,6 +101,9 @@ class JarvisLocalRepository(private val db: JarvisDatabase) {
     suspend fun upsertDeviceApp(app: DeviceAppKnowledgeEntity) =
         db.deviceKnowledgeDao().upsertApp(app)
 
+    suspend fun deleteDeviceApp(packageName: String) =
+        db.deviceKnowledgeDao().deleteApp(packageName)
+
     suspend fun getAllDeviceAppsSnapshot(): List<DeviceAppKnowledgeEntity> =
         db.deviceKnowledgeDao().getAllLearnedAppsSnapshot()
 

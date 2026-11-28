@@ -332,6 +332,25 @@ class SecureCredentialStore(context: Context) {
         remove(KEY_DEVICE_UNLOCK_PATTERN)
     }
 
+    fun saveNvidiaNimApiOverride(apiKey: String): Boolean {
+        val cleaned = SecretsConfig.cleanSecret(apiKey)
+        return if (cleaned.isNullOrBlank()) {
+            false
+        } else {
+            putEncrypted(KEY_NVIDIA_NIM_API_OVERRIDE, cleaned)
+            true
+        }
+    }
+
+    fun getNvidiaNimApiOverride(): String =
+        SecretsConfig.cleanSecret(getDecrypted(KEY_NVIDIA_NIM_API_OVERRIDE)).orEmpty()
+
+    fun hasNvidiaNimApiOverride(): Boolean = getNvidiaNimApiOverride().isNotBlank()
+
+    fun clearNvidiaNimApiOverride() {
+        remove(KEY_NVIDIA_NIM_API_OVERRIDE)
+    }
+
     data class OwnerVoiceProfile(
         val anchorBands: DoubleArray,
         val adaptiveBands: DoubleArray,

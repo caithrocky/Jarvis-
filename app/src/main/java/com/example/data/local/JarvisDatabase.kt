@@ -309,6 +309,9 @@ interface DeviceKnowledgeDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertApp(app: DeviceAppKnowledgeEntity)
 
+    @Query("DELETE FROM device_app_knowledge WHERE packageName = :packageName")
+    suspend fun deleteApp(packageName: String)
+
     @Query("SELECT * FROM learned_workflows ORDER BY updatedMs DESC")
     fun observeWorkflows(): Flow<List<LearnedWorkflowEntity>>
 

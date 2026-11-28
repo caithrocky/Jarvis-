@@ -23,6 +23,8 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import androidx.core.content.ContextCompat
+import com.example.assistant.OfflineAssistantEngine
+import com.example.assistant.OfflineModelManager
 import com.example.data.remote.NvidiaMagpieTtsClient
 import com.example.data.remote.SynthesizedAudio
 import com.example.domain.model.OrbState
@@ -60,7 +62,8 @@ enum class VoicePipelinePhase {
 class JarvisVoiceEngine(
     private val context: Context,
     private val magpieTtsClient: NvidiaMagpieTtsClient? = null,
-    private val credentialStore: SecureCredentialStore? = null
+    private val credentialStore: SecureCredentialStore? = null,
+    private val offlineModelManager: OfflineModelManager? = null
 ) {
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -90,6 +93,8 @@ class JarvisVoiceEngine(
     private var lastRecognizerActivityMs = 0L
     private var watchdogJob: Job? = null
     private var standbyMonitorJob: Job? = null
+    private var voskDirectJob: Job? = null
+    private val voskOfflineStt = VoskOfflineSpeechRecognizer()
     @Volatile
     private var activeStandbyAudioRecord: AudioRecord? = null
     @Volatile
@@ -224,6 +229,7 @@ class JarvisVoiceEngine(
         if (muted) {
             vad.stopBargeInMonitor()
             stopContinuousStandbyMonitor()
+            stopVoskDirectCapture()
             interruptSpeech()
             watchdogJob?.cancel()
             watchdogJob = null
@@ -311,7 +317,11 @@ class JarvisVoiceEngine(
         continuousSession = false
         sessionChimePlayed = false
         _phase.value = VoicePipelinePhase.WAKE_WORD_STANDBY
-        _statusDetail.value = "Always listening for \"Hey JARVIS\""
+        _statusDetail.value = if (shouldUseVoskOfflineStt()) {
+            "Offline Voice (Vosk) • Listening for \"Hey JARVIS\""
+        } else {
+            "Always listening for \"Hey JARVIS\""
+        }
         startAlwaysOnWatchdog()
         if (!alreadyWarm) {
             mainHandler.post { ensureSpeechRecognizer() }
@@ -543,6 +553,7 @@ class JarvisVoiceEngine(
         watchdogJob?.cancel()
         watchdogJob = null
         stopContinuousStandbyMonitor()
+        stopVoskDirectCapture()
         pendingListenRunnable?.let { mainHandler.removeCallbacks(it) }
         pendingListenRunnable = null
         isRecognizerListening = false
@@ -564,6 +575,7 @@ class JarvisVoiceEngine(
         streamingSpeechChannel?.close()
         stopAudioTrack()
         stopContinuousStandbyMonitor()
+        stopVoskDirectCapture()
         pendingListenRunnable?.let { mainHandler.removeCallbacks(it) }
         pendingListenRunnable = null
         isRecognizerListening = false
@@ -639,6 +651,7 @@ class JarvisVoiceEngine(
         streamingSpeechChannel = null
         stopAudioTrack()
         stopContinuousStandbyMonitor()
+        stopVoskDirectCapture()
 
         pendingListenRunnable?.let { mainHandler.removeCallbacks(it) }
         pendingListenRunnable = null
@@ -1112,6 +1125,11 @@ class JarvisVoiceEngine(
         }
     }
 
+    private fun stopVoskDirectCapture() {
+        voskDirectJob?.cancel()
+        voskDirectJob = null
+    }
+
     private fun stopContinuousStandbyMonitor() {
         isPipeSessionActive = false
         standbyMonitorJob?.cancel()
@@ -1127,7 +1145,7 @@ class JarvisVoiceEngine(
         if (!alwaysOnEnabled || _isMuted.value || !hasMicPermission()) return
         if (_phase.value == VoicePipelinePhase.SPEAKING_RESPONSE) return
         if (standbyMonitorJob?.isActive == true) return
-        if (isRecognizerListening) return
+        if (isRecognizerListening || voskDirectJob?.isActive == true) return
 
         standbyMonitorJob = engineScope.launch(Dispatchers.IO) {
             val sampleRate = 16000
@@ -1174,6 +1192,10 @@ class JarvisVoiceEngine(
             var pipeUtteranceStartedAtMs = 0L
             var pipeLastVoiceMs = 0L
             var switchToDirectRecognizer = false
+
+            var voskStandbyPrepared = false
+            var voskSawSpeech = false
+            var voskLastSpeechMs = 0L
 
             try {
                 recorder.startRecording()
@@ -1252,6 +1274,65 @@ class JarvisVoiceEngine(
 
                     vad.updateAmbientRms(rawRms)
 
+                    // Genuine Offline Vosk STT path when internet is offline & Vosk model is installed
+                    val voskDir = if (!isNetworkConnected()) offlineModelManager?.getVoskModelDirIfReady() else null
+                    if (voskDir != null) {
+                        if (!voskStandbyPrepared) {
+                            voskStandbyPrepared = voskOfflineStt.prepareSession(voskDir)
+                            if (voskStandbyPrepared && _phase.value == VoicePipelinePhase.WAKE_WORD_STANDBY) {
+                                _statusDetail.value = "Offline Voice (Vosk) • Listening for \"Hey JARVIS\""
+                            }
+                        }
+                        if (voskStandbyPrepared) {
+                            val nowMs = System.currentTimeMillis()
+                            if (vad.isSpeechOverThreshold(rawRms, peak)) {
+                                voskSawSpeech = true
+                                voskLastSpeechMs = nowMs
+                            }
+                            val step = voskOfflineStt.acceptPcmSamples(shortBuf, read)
+                            if (step.partialText.isNotBlank()) {
+                                _partialTranscript.value = step.partialText
+                                if (_phase.value == VoicePipelinePhase.WAKE_WORD_STANDBY) {
+                                    val wakePreview = ContextualWakeDetector.evaluate(step.partialText, inActiveConversation = false)
+                                    if (wakePreview.intent == WakeIntent.DIRECT_WAKE) {
+                                        _statusDetail.value = "Yes, Sir..."
+                                    }
+                                }
+                            }
+                            var finalUtterance = if (step.didFinalize) step.finalizedText else ""
+                            if (finalUtterance.isBlank() && voskSawSpeech && (nowMs - voskLastSpeechMs > 1350L)) {
+                                finalUtterance = voskOfflineStt.flushFinalResult()
+                                voskSawSpeech = false
+                            }
+                            if (finalUtterance.isNotBlank()) {
+                                voskSawSpeech = false
+                                _partialTranscript.value = ""
+                                voskOfflineStt.resetSession()
+                                val eval = ContextualWakeDetector.evaluate(
+                                    finalUtterance,
+                                    inActiveConversation = _phase.value == VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE || userFacingActive || continuousSession
+                                )
+                                val shouldExitStandbyLoop = eval.intent == WakeIntent.DIRECT_WAKE ||
+                                    _phase.value == VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE ||
+                                    userFacingActive ||
+                                    continuousSession
+                                val captured = finalUtterance
+                                mainHandler.post { handleRecognizedText(captured, isFinal = true) }
+                                if (shouldExitStandbyLoop) {
+                                    break
+                                }
+                            }
+                            continue
+                        }
+                    } else if (voskStandbyPrepared) {
+                        voskStandbyPrepared = false
+                        voskSawSpeech = false
+                        voskOfflineStt.resetSession()
+                        if (_phase.value == VoicePipelinePhase.WAKE_WORD_STANDBY) {
+                            _statusDetail.value = "Always listening for \"Hey JARVIS\""
+                        }
+                    }
+
                     if (vad.isSpeechOverThreshold(rawRms, peak)) {
                         hotFrames++
                         if (hotFrames >= 2) {
@@ -1316,12 +1397,10 @@ class JarvisVoiceEngine(
         }
     }
 
-    private fun isNetworkConnected(): Boolean {
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
-        val network = cm.activeNetwork ?: return false
-        val caps = cm.getNetworkCapabilities(network) ?: return false
-        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-    }
+    private fun shouldUseVoskOfflineStt(): Boolean =
+        !isNetworkConnected() && offlineModelManager?.isVoskModelInstalled() == true
+
+    private fun isNetworkConnected(): Boolean = OfflineAssistantEngine.isNetworkConnected(context)
 
     private fun buildRecognizerIntent(readFd: ParcelFileDescriptor? = null): Intent {
         val useOfflineOnly = !isNetworkConnected()
@@ -1423,11 +1502,17 @@ class JarvisVoiceEngine(
     private fun startDirectRecognizerSession() {
         if (!hasMicPermission() || _isMuted.value) return
         if (_phase.value == VoicePipelinePhase.STOPPED || _phase.value == VoicePipelinePhase.SPEAKING_RESPONSE) return
-        if (isRecognizerListening) return
+        if (isRecognizerListening || voskDirectJob?.isActive == true) return
 
         stopContinuousStandbyMonitor()
         currentRecognizerIsPipe = false
         lastSessionPartialTranscript = ""
+
+        val voskDir = if (!isNetworkConnected()) offlineModelManager?.getVoskModelDirIfReady() else null
+        if (voskDir != null) {
+            startVoskDirectCommandSession(voskDir)
+            return
+        }
 
         val recognizer = ensureSpeechRecognizer()
         val intent = buildRecognizerIntent(readFd = null)
@@ -1445,6 +1530,104 @@ class JarvisVoiceEngine(
             } else {
                 _statusDetail.value = "Speech recognizer unavailable on device"
                 _phase.value = VoicePipelinePhase.STOPPED
+            }
+        }
+    }
+
+    private fun startVoskDirectCommandSession(modelDir: java.io.File) {
+        stopVoskDirectCapture()
+        voskDirectJob = engineScope.launch(Dispatchers.IO) {
+            if (!voskOfflineStt.prepareSession(modelDir)) {
+                return@launch
+            }
+            val sampleRate = 16000
+            val minBuf = AudioRecord.getMinBufferSize(
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            ).coerceAtLeast(4096)
+
+            val recorder = runCatching {
+                AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    minBuf * 2
+                )
+            }.getOrNull() ?: return@launch
+
+            if (recorder.state != AudioRecord.STATE_INITIALIZED) {
+                runCatching { recorder.release() }
+                return@launch
+            }
+
+            _statusDetail.value = "Offline Voice (Vosk) • Listening, Sir..."
+            val chunk = ShortArray(512)
+            var sawSpeech = false
+            var lastSpeechMs = System.currentTimeMillis()
+            val startedMs = lastSpeechMs
+            var capturedText = ""
+
+            try {
+                recorder.startRecording()
+                while (isActive &&
+                    !_isMuted.value &&
+                    _phase.value != VoicePipelinePhase.SPEAKING_RESPONSE &&
+                    _phase.value != VoicePipelinePhase.STOPPED
+                ) {
+                    val read = recorder.read(chunk, 0, chunk.size)
+                    if (read <= 0) break
+
+                    var sumSq = 0.0
+                    var peak = 0
+                    for (i in 0 until read) {
+                        val sVal = chunk[i].toInt()
+                        val absV = if (sVal < 0) -sVal else sVal
+                        if (absV > peak) peak = absV
+                        val norm = sVal / 32768.0
+                        sumSq += norm * norm
+                    }
+                    val rms = sqrt(sumSq / read).toFloat()
+                    _rmsLevel.value = (rms * 4.2f).coerceIn(0.05f, 1.0f)
+
+                    val now = System.currentTimeMillis()
+                    if (vad.isSpeechOverThreshold(rms, peak)) {
+                        sawSpeech = true
+                        lastSpeechMs = now
+                    }
+                    val step = voskOfflineStt.acceptPcmSamples(chunk, read)
+                    if (step.partialText.isNotBlank()) {
+                        _partialTranscript.value = step.partialText
+                    }
+                    if (step.didFinalize && step.finalizedText.isNotBlank()) {
+                        capturedText = step.finalizedText
+                        break
+                    }
+                    if (sawSpeech && now - lastSpeechMs > 1500L) {
+                        capturedText = voskOfflineStt.flushFinalResult()
+                        break
+                    }
+                    if (!sawSpeech && now - startedMs > 9000L) {
+                        break
+                    }
+                    if (now - startedMs > 15_000L) {
+                        capturedText = voskOfflineStt.flushFinalResult()
+                        break
+                    }
+                }
+            } catch (_: Throwable) {
+                // Handled below
+            } finally {
+                _rmsLevel.value = 0f
+                runCatching { recorder.stop() }
+                runCatching { recorder.release() }
+                voskOfflineStt.resetSession()
+            }
+
+            if (isActive && !_isMuted.value && _phase.value != VoicePipelinePhase.STOPPED) {
+                val finalOut = capturedText.trim()
+                mainHandler.post { handleRecognizedText(finalOut, isFinal = true) }
             }
         }
     }
@@ -1597,6 +1780,7 @@ class JarvisVoiceEngine(
                 val stuckActivePhase = _phase.value == VoicePipelinePhase.ACTIVE_COMMAND_CAPTURE &&
                     !isRecognizerListening &&
                     !isPipeSessionActive &&
+                    voskDirectJob?.isActive != true &&
                     (now - lastActiveCommandEnteredAtMs > 18_000L)
 
                 when {
@@ -1612,12 +1796,17 @@ class JarvisVoiceEngine(
                     }
                     stuckActivePhase -> {
                         _phase.value = VoicePipelinePhase.WAKE_WORD_STANDBY
-                        _statusDetail.value = "Always listening for \"Hey JARVIS\""
+                        _statusDetail.value = if (shouldUseVoskOfflineStt()) {
+                            "Offline Voice (Vosk) • Listening for \"Hey JARVIS\""
+                        } else {
+                            "Always listening for \"Hey JARVIS\""
+                        }
                         startContinuousStandbyMonitor()
                     }
                     _phase.value == VoicePipelinePhase.WAKE_WORD_STANDBY &&
                         standbyMonitorJob?.isActive != true &&
                         !isRecognizerListening &&
+                        voskDirectJob?.isActive != true &&
                         pendingListenRunnable == null -> {
                         startContinuousStandbyMonitor()
                     }
@@ -1651,6 +1840,7 @@ class JarvisVoiceEngine(
         stopAllListening()
         interruptSpeech()
         restoreSystemEarconIfMuted()
+        voskOfflineStt.release()
         engineScope.cancel()
     }
 }

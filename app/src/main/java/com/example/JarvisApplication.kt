@@ -2,10 +2,18 @@ package com.example
 
 import android.app.Activity
 import android.app.Application
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import android.os.Bundle
+import com.example.assistant.AccessibilityDiagnostics
 import com.example.assistant.AppDiscoveryEngine
 import com.example.assistant.DeviceLearningEngine
 import com.example.assistant.JarvisCommandCoordinator
+import com.example.assistant.LocalLfmLlmEngine
+import com.example.assistant.OfflineModelManager
 import com.example.data.local.JarvisDatabase
 import com.example.data.local.JarvisLocalRepository
 import com.example.data.local.JarvisPreferencesRepository
@@ -46,6 +54,10 @@ class JarvisApplication : Application() {
         private set
     lateinit var magpieTtsClient: NvidiaMagpieTtsClient
         private set
+    lateinit var offlineModelManager: OfflineModelManager
+        private set
+    lateinit var localLfmEngine: LocalLfmLlmEngine
+        private set
     lateinit var voiceEngine: JarvisVoiceEngine
         private set
     lateinit var deviceLearningEngine: DeviceLearningEngine
@@ -53,10 +65,44 @@ class JarvisApplication : Application() {
     lateinit var commandCoordinator: JarvisCommandCoordinator
         private set
 
-    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val appScope = CoroutineScope(
+        SupervisorJob() +
+            Dispatchers.IO +
+            AccessibilityDiagnostics.coroutineExceptionHandler("JarvisApplication")
+    )
     private var startedActivityCount = 0
 
+    private val packageWatcherReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context?, intent: Intent?) {
+            val action = intent?.action ?: return
+            val pkg = intent.data?.schemeSpecificPart?.trim().orEmpty()
+            if (pkg.isBlank() || pkg == packageName) return
+            appScope.launch {
+                runCatching {
+                    when (action) {
+                        Intent.ACTION_PACKAGE_ADDED, Intent.ACTION_PACKAGE_REPLACED -> {
+                            val reason = if (intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)) {
+                                "app_update"
+                            } else {
+                                "new_install"
+                            }
+                            deviceLearningEngine.learnSingleApp(pkg, triggerReason = reason)
+                        }
+                        Intent.ACTION_PACKAGE_REMOVED -> {
+                            if (!intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)) {
+                                deviceLearningEngine.onPackageRemoved(pkg)
+                            }
+                        }
+                    }
+                }.onFailure { err ->
+                    AccessibilityDiagnostics.recordNonFatalError("packageWatcher[$action]", err, this@JarvisApplication)
+                }
+            }
+        }
+    }
+
     override fun onCreate() {
+        AccessibilityDiagnostics.installUncaughtExceptionReporter(this)
         super.onCreate()
         JarvisNotificationHelper.ensureChannels(this)
 
@@ -76,8 +122,10 @@ class JarvisApplication : Application() {
         newsEngine = NewsAndResearchEngine(webClient)
         nimClient = NvidiaNimClient(httpClient)
         magpieTtsClient = NvidiaMagpieTtsClient(httpClient)
-        voiceEngine = JarvisVoiceEngine(this, magpieTtsClient, credentialStore)
-        deviceLearningEngine = DeviceLearningEngine(this, localRepository, preferencesRepository)
+        offlineModelManager = OfflineModelManager(this, httpClient)
+        localLfmEngine = LocalLfmLlmEngine(offlineModelManager)
+        voiceEngine = JarvisVoiceEngine(this, magpieTtsClient, credentialStore, offlineModelManager)
+        deviceLearningEngine = DeviceLearningEngine(this, localRepository, preferencesRepository, webClient)
 
         commandCoordinator = JarvisCommandCoordinator(
             context = this,
@@ -89,13 +137,19 @@ class JarvisApplication : Application() {
             voiceEngine = voiceEngine,
             deviceLearningEngine = deviceLearningEngine,
             appDiscoveryEngine = appDiscoveryEngine,
-            newsEngine = newsEngine
+            newsEngine = newsEngine,
+            offlineModelManager = offlineModelManager,
+            localLfmEngine = localLfmEngine
         )
         commandCoordinator.attachVoiceEngineCallbacks()
 
-        DeviceLearningEngine.scheduleDailyStudy(this)
+        registerPackageInstallWatcher()
+
+        runCatching { DeviceLearningEngine.scheduleDailyStudy(this) }
+            .onFailure { AccessibilityDiagnostics.recordNonFatalError("scheduleDailyStudy", it, this) }
         appScope.launch {
-            deviceLearningEngine.studyIfDailyDue()
+            runCatching { deviceLearningEngine.studyIfDailyDue() }
+                .onFailure { AccessibilityDiagnostics.recordNonFatalError("studyIfDailyDue", it, this@JarvisApplication) }
         }
 
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
@@ -119,5 +173,24 @@ class JarvisApplication : Application() {
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
             override fun onActivityDestroyed(activity: Activity) {}
         })
+    }
+
+    private fun registerPackageInstallWatcher() {
+        runCatching {
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_PACKAGE_ADDED)
+                addAction(Intent.ACTION_PACKAGE_REPLACED)
+                addAction(Intent.ACTION_PACKAGE_REMOVED)
+                addDataScheme("package")
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(packageWatcherReceiver, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                registerReceiver(packageWatcherReceiver, filter)
+            }
+        }.onFailure { err ->
+            AccessibilityDiagnostics.recordNonFatalError("registerPackageInstallWatcher", err, this)
+        }
     }
 }

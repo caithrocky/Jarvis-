@@ -35,6 +35,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -63,6 +64,10 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.core.content.pm.PackageInfoCompat
+import com.example.assistant.AccessibilityHealthState
+import com.example.assistant.ModelInstallStage
+import com.example.assistant.OfflineModelItemState
+import com.example.assistant.OfflineModelManager
 import com.example.data.local.JarvisUserSettings
 import com.example.domain.model.AiModelOption
 import com.example.domain.model.VoicePersonality
@@ -116,7 +121,16 @@ fun SettingsScreen(
     onToggleDeviceUnlockEnabled: (Boolean) -> Unit,
     onSaveSafeWord: (String) -> Unit,
     onSaveUnlockPattern: (List<Int>) -> Unit,
-    onClearUnlockCredentials: () -> Unit
+    onClearUnlockCredentials: () -> Unit,
+    onSaveNvidiaNimKey: (String) -> Unit,
+    onClearNvidiaNimKeyOverride: () -> Unit,
+    onToggleAutoOfflineSwitch: (Boolean) -> Unit,
+    onDownloadLfmModel: () -> Unit,
+    onCancelLfmDownload: () -> Unit,
+    onDeleteLfmModel: () -> Unit,
+    onDownloadVoskModel: () -> Unit,
+    onCancelVoskDownload: () -> Unit,
+    onDeleteVoskModel: () -> Unit
 ) {
     val context = LocalContext.current
     val jc = LocalJarvisColors.current
@@ -166,11 +180,28 @@ fun SettingsScreen(
                     actionLabel = if (uiState.hasOverlayPermission) "Allowed" else "Allow",
                     onAction = onRequestOverlayPermission
                 )
+                val accState = uiState.accessibilityHealthState
+                val accColor = when (accState) {
+                    AccessibilityHealthState.OPERATIONAL, AccessibilityHealthState.CONNECTED -> ProfitEmerald
+                    AccessibilityHealthState.CONNECTING -> ArcCyan
+                    AccessibilityHealthState.MALFUNCTION_DETECTED -> MaterialTheme.colorScheme.error
+                    else -> WarningAmber
+                }
+                val accActionLabel = when (accState) {
+                    AccessibilityHealthState.OPERATIONAL -> "Operational"
+                    AccessibilityHealthState.CONNECTED -> "Connected"
+                    AccessibilityHealthState.CONNECTING -> "Binding"
+                    AccessibilityHealthState.MALFUNCTION_DETECTED -> "Repair"
+                    AccessibilityHealthState.PERMISSION_ENABLED_NOT_CONNECTED -> "Rebind"
+                    AccessibilityHealthState.PERMISSION_DISABLED -> "Enable"
+                }
                 PermissionHealthRow(
                     label = "Screen Helper (UI & Social Automation)",
                     granted = uiState.isScreenHelperEnabled,
-                    actionLabel = if (uiState.isScreenHelperEnabled) "Active" else "Enable",
-                    onAction = { showScreenDisclosure = true }
+                    actionLabel = accActionLabel,
+                    onAction = { showScreenDisclosure = true },
+                    statusText = uiState.accessibilityStatusDetail,
+                    statusColor = accColor
                 )
                 PermissionHealthRow(
                     label = "Notification Access (Missed Calls & Texts)",
@@ -288,7 +319,15 @@ fun SettingsScreen(
                             .weight(1f)
                             .testTag("settings_accessibility_btn")
                     ) {
-                        Text(if (uiState.isScreenHelperEnabled) "Screen Helper: ON" else "Enable Screen Helper")
+                        val btnText = when (uiState.accessibilityHealthState) {
+                            AccessibilityHealthState.OPERATIONAL -> "Helper: Operational"
+                            AccessibilityHealthState.CONNECTED -> "Helper: Connected"
+                            AccessibilityHealthState.CONNECTING -> "Helper: Binding"
+                            AccessibilityHealthState.MALFUNCTION_DETECTED -> "Repair Helper"
+                            AccessibilityHealthState.PERMISSION_ENABLED_NOT_CONNECTED -> "Rebind Helper"
+                            AccessibilityHealthState.PERMISSION_DISABLED -> "Enable Screen Helper"
+                        }
+                        Text(btnText)
                     }
                 }
                 Spacer(Modifier.height(8.dp))
@@ -307,10 +346,32 @@ fun SettingsScreen(
             }
         }
 
-        // NVIDIA NIM Intelligence Model (API key bound via Secrets/BuildConfig)
+        // NVIDIA NIM Intelligence Model (in-app editable Keystore override + Build/GitHub Secrets)
         item {
+            var nimKeyDraft by remember { mutableStateOf("") }
+            var showNimKey by remember { mutableStateOf(false) }
+
             HudGlassCard {
-                Text("NVIDIA NIM INTELLIGENCE MODEL", style = MaterialTheme.typography.titleMedium, color = ArcCyan)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "NVIDIA NIM INTELLIGENCE MODEL",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = ArcCyan,
+                        modifier = Modifier.weight(1f)
+                    )
+                    StatusBadge(
+                        text = uiState.nvidiaNimKeySource.uppercase(),
+                        color = if (uiState.hasBuildConfigNvidiaKey || uiState.hasRuntimeNvidiaKeyOverride) {
+                            ProfitEmerald
+                        } else {
+                            WarningAmber
+                        }
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
                 AiModelOption.catalog.forEach { opt ->
                     val selected = settings.selectedModelId == opt.id
@@ -331,18 +392,75 @@ fun SettingsScreen(
                     }
                     Spacer(Modifier.height(6.dp))
                 }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "API Key Source: ${uiState.nvidiaNimKeySource}. Keys saved here are encrypted in Android Keystore and persist across GitHub APK updates.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = jc.mutedSlate
+                )
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = nimKeyDraft,
+                    onValueChange = { nimKeyDraft = it },
+                    label = { Text("Enter or Update NVIDIA NIM API Key") },
+                    placeholder = { Text("nvapi-...") },
+                    singleLine = true,
+                    visualTransformation = if (showNimKey) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { showNimKey = !showNimKey }) {
+                            Icon(
+                                imageVector = if (showNimKey) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (showNimKey) "Hide API key" else "Show API key"
+                            )
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("nvidia_nim_key_input")
+                )
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = {
+                            onSaveNvidiaNimKey(nimKeyDraft)
+                            if (nimKeyDraft.trim().length >= 12) {
+                                nimKeyDraft = ""
+                            }
+                        },
+                        enabled = nimKeyDraft.trim().isNotBlank(),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("save_nvidia_nim_key_btn")
+                    ) {
+                        Text("Save Key")
+                    }
+                    if (uiState.hasRuntimeNvidiaKeyOverride) {
+                        OutlinedButton(
+                            onClick = {
+                                nimKeyDraft = ""
+                                onClearNvidiaNimKeyOverride()
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("clear_nvidia_nim_key_btn")
+                        ) {
+                            Text(if (uiState.hasBuildConfigNvidiaKey) "Use Build Key" else "Clear Key")
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
                 Button(
                     onClick = onTestNvidiaConnection,
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("test_nvidia_nim_btn")
                 ) { Text("Test NVIDIA NIM & Magpie Voice") }
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(8.dp))
                 Text(
                     text = if (uiState.hasBuildConfigNvidiaKey || uiState.hasRuntimeNvidiaKeyOverride) {
-                        "NVIDIA NIM & Magpie Voice Status: Key Active"
+                        "NVIDIA NIM & Magpie Voice Status: Key Active (${uiState.nvidiaNimKeySource})"
                     } else {
-                        "NVIDIA NIM Key Not In This APK — add NVIDIA_NIM_API_KEY in AI Studio Secrets and reinstall the new APK (or add it to GitHub Repo Actions Secrets for GitHub Releases)."
+                        "No NVIDIA NIM Key yet — paste your nvapi-... key above, or add NVIDIA_NIM_API_KEY in GitHub Repo Actions Secrets for release APKs."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = if (uiState.hasBuildConfigNvidiaKey || uiState.hasRuntimeNvidiaKeyOverride) ProfitEmerald else WarningAmber
@@ -351,6 +469,76 @@ fun SettingsScreen(
                     Spacer(Modifier.height(6.dp))
                     Text(diag, style = MaterialTheme.typography.labelMedium, color = ArcCyan)
                 }
+            }
+        }
+
+        // Offline AI (LFM2.5 1.2B) & Offline Speech Recognition (Vosk)
+        item {
+            val lfmItem = uiState.offlineModelsState.lfmModel
+            val voskItem = uiState.offlineModelsState.voskSttModel
+            val activeEngineBadge = when {
+                uiState.isOnline -> "ONLINE: NIM"
+                settings.autoOfflineSwitchEnabled && uiState.isLfmOfflineReady -> "AUTO-OFFLINE: LFM2.5"
+                else -> "OFFLINE: CORE"
+            }
+            val activeEngineColor = when {
+                uiState.isOnline -> ElectricBlue
+                settings.autoOfflineSwitchEnabled && uiState.isLfmOfflineReady -> ProfitEmerald
+                else -> WarningAmber
+            }
+
+            HudGlassCard(borderColor = ProfitEmerald.copy(alpha = 0.35f)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "OFFLINE AI & OFFLINE VOICE",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = ArcCyan,
+                        modifier = Modifier.weight(1f)
+                    )
+                    StatusBadge(text = activeEngineBadge, color = activeEngineColor)
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "Automatically switches from NVIDIA NIM to local Liquid AI LFM2.5 1.2B + Vosk offline speech recognition whenever your device loses network connectivity.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = jc.mutedSlate
+                )
+                Spacer(Modifier.height(8.dp))
+                SettingToggleRow(
+                    title = "Auto-Switch to LFM2.5 1.2B Offline",
+                    subtitle = "Use downloaded on-device LFM2.5 1.2B whenever internet is offline or cloud NIM is unavailable",
+                    checked = settings.autoOfflineSwitchEnabled,
+                    onCheckedChange = onToggleAutoOfflineSwitch,
+                    testTag = "toggle_auto_offline_switch"
+                )
+
+                OfflineModelRow(
+                    title = "LFM2.5 1.2B Instruct (GGUF Q4_K_M)",
+                    subtitle = "On-device AI brain (~731 MB, arm64) • Resumable download",
+                    item = lfmItem,
+                    downloadButtonTag = "download_lfm_model_btn",
+                    cancelButtonTag = "cancel_lfm_model_btn",
+                    deleteButtonTag = "delete_lfm_model_btn",
+                    onDownload = onDownloadLfmModel,
+                    onCancel = onCancelLfmDownload,
+                    onDelete = onDeleteLfmModel
+                )
+                Spacer(Modifier.height(10.dp))
+                OfflineModelRow(
+                    title = "Vosk Offline Speech Recognition (EN-US)",
+                    subtitle = "Hands-free standby & command voice intake offline (~41 MB)",
+                    item = voskItem,
+                    downloadButtonTag = "download_vosk_model_btn",
+                    cancelButtonTag = "cancel_vosk_model_btn",
+                    deleteButtonTag = "delete_vosk_model_btn",
+                    onDownload = onDownloadVoskModel,
+                    onCancel = onCancelVoskDownload,
+                    onDelete = onDeleteVoskModel
+                )
             }
         }
 
@@ -676,22 +864,22 @@ fun SettingsScreen(
                 Text("VISUAL ACTION OVERLAYS & HUD", style = MaterialTheme.typography.titleMedium, color = ArcCyan)
                 Spacer(Modifier.height(8.dp))
                 SettingToggleRow(
-                    title = "Show Tap Ripples",
-                    subtitle = "Display glowing cyan tap circles whenever JARVIS taps on screen",
+                    title = "Show Tap & Multi-Touch",
+                    subtitle = "Display glowing cyan tap circles & multi-finger touch rings (voice: \"Show taps\")",
                     checked = settings.showTapIndicator,
                     onCheckedChange = onToggleShowTapIndicator,
                     testTag = "toggle_show_taps"
                 )
                 SettingToggleRow(
                     title = "Highlight Screen Targets",
-                    subtitle = "Draw glowing borders & #1/#2/#3 contact badges around targets JARVIS picks",
+                    subtitle = "Draw glowing borders & #1/#2/#3 badges around targets JARVIS picks",
                     checked = settings.showHighlightIndicator,
                     onCheckedChange = onToggleShowHighlightIndicator,
                     testTag = "toggle_show_highlights"
                 )
                 SettingToggleRow(
-                    title = "Show Scroll Indicators",
-                    subtitle = "Render animated directional chevrons during autonomous scrolling",
+                    title = "Show Scrolling",
+                    subtitle = "Render animated directional & diagonal chevrons during free-roam scrolling (voice: \"Show scrolling\")",
                     checked = settings.showScrollIndicator,
                     onCheckedChange = onToggleShowScrollIndicator,
                     testTag = "toggle_show_scrolls"
@@ -714,7 +902,7 @@ fun SettingsScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("DAILY DEVICE SELF-LEARNING", style = MaterialTheme.typography.titleMedium, color = ArcCyan)
+                    Text("AUTONOMOUS APP & DEVICE LEARNING", style = MaterialTheme.typography.titleMedium, color = ArcCyan)
                     StatusBadge(
                         text = "${uiState.learnedAppsCount} APPS",
                         color = ProfitEmerald
@@ -722,14 +910,14 @@ fun SettingsScreen(
                 }
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    text = "Studied ${uiState.learnedAppsCount} apps • ${uiState.learnedWorkflowsCount} screen workflows • ${uiState.ownerHabitsCount} learned habits.",
+                    text = "Studied ${uiState.learnedAppsCount} installed & system apps • ${uiState.learnedWorkflowsCount} screen workflows • ${uiState.ownerHabitsCount} habits.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = jc.mutedSlate
                 )
                 Spacer(Modifier.height(8.dp))
                 SettingToggleRow(
-                    title = "Learn Device & Habits Daily",
-                    subtitle = "Automatically studies installed apps, UI paths & your daily routine every 24h",
+                    title = "Auto-Learn New & Existing Apps",
+                    subtitle = "Automatically inspects all apps, newly installed apps & researches commands online",
                     checked = settings.autoLearnDeviceDaily,
                     onCheckedChange = onToggleAutoLearnDaily,
                     testTag = "toggle_auto_learn_daily"
@@ -740,7 +928,7 @@ fun SettingsScreen(
                         .fillMaxWidth()
                         .testTag("study_device_now_btn")
                 ) {
-                    Text("Study Device & Apps Now")
+                    Text("Inspect & Learn All Apps Now")
                 }
             }
         }
@@ -864,7 +1052,9 @@ private fun PermissionHealthRow(
     granted: Boolean,
     actionLabel: String,
     onAction: () -> Unit,
-    testTag: String? = null
+    testTag: String? = null,
+    statusText: String? = null,
+    statusColor: Color? = null
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -874,9 +1064,9 @@ private fun PermissionHealthRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(label, style = MaterialTheme.typography.bodyMedium)
             Text(
-                text = if (granted) "Ready" else "Setup recommended",
+                text = statusText ?: if (granted) "Ready" else "Setup recommended",
                 style = MaterialTheme.typography.labelSmall,
-                color = if (granted) ProfitEmerald else WarningAmber
+                color = statusColor ?: if (granted) ProfitEmerald else WarningAmber
             )
         }
         OutlinedButton(
@@ -887,6 +1077,141 @@ private fun PermissionHealthRow(
         }
     }
     Spacer(Modifier.height(6.dp))
+}
+
+@Composable
+private fun OfflineModelRow(
+    title: String,
+    subtitle: String,
+    item: OfflineModelItemState,
+    downloadButtonTag: String,
+    cancelButtonTag: String,
+    deleteButtonTag: String,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val jc = LocalJarvisColors.current
+    val stageBadgeText = when (item.stage) {
+        ModelInstallStage.INSTALLED -> "INSTALLED"
+        ModelInstallStage.DOWNLOADING -> "DOWNLOADING"
+        ModelInstallStage.EXTRACTING -> "EXTRACTING"
+        ModelInstallStage.ERROR -> "ERROR"
+        ModelInstallStage.NOT_INSTALLED -> "NOT INSTALLED"
+    }
+    val stageBadgeColor = when (item.stage) {
+        ModelInstallStage.INSTALLED -> ProfitEmerald
+        ModelInstallStage.DOWNLOADING, ModelInstallStage.EXTRACTING -> ArcCyan
+        ModelInstallStage.ERROR -> MaterialTheme.colorScheme.error
+        ModelInstallStage.NOT_INSTALLED -> WarningAmber
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0x440A1833))
+            .border(1.dp, ArcCyan.copy(alpha = 0.22f), RoundedCornerShape(14.dp))
+            .padding(12.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+            Spacer(Modifier.width(8.dp))
+            StatusBadge(text = stageBadgeText, color = stageBadgeColor)
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(subtitle, style = MaterialTheme.typography.bodySmall, color = jc.mutedSlate)
+
+        when (item.stage) {
+            ModelInstallStage.DOWNLOADING, ModelInstallStage.EXTRACTING -> {
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { item.progressFraction.coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = if (item.stage == ModelInstallStage.EXTRACTING) {
+                        "Extracting package..."
+                    } else {
+                        val pct = (item.progressFraction * 100).toInt()
+                        "${OfflineModelManager.formatMb(item.downloadedBytes)} / ${OfflineModelManager.formatMb(item.totalBytes)} ($pct%)"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = ArcCyan
+                )
+                Spacer(Modifier.height(6.dp))
+                OutlinedButton(
+                    onClick = onCancel,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(cancelButtonTag)
+                ) {
+                    Text("Pause / Cancel Download")
+                }
+            }
+
+            ModelInstallStage.INSTALLED -> {
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Ready on device (${OfflineModelManager.formatMb(item.installedSizeBytes)})",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = ProfitEmerald,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedButton(
+                        onClick = onDelete,
+                        modifier = Modifier.testTag(deleteButtonTag)
+                    ) {
+                        Text("Remove")
+                    }
+                }
+            }
+
+            ModelInstallStage.ERROR, ModelInstallStage.NOT_INSTALLED -> {
+                item.errorMessage?.let { err ->
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = err,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                if (item.downloadedBytes > 0L && item.totalBytes > 0L) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Partial download saved: ${OfflineModelManager.formatMb(item.downloadedBytes)} / ${OfflineModelManager.formatMb(item.totalBytes)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = jc.mutedSlate
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = onDownload,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(downloadButtonTag)
+                ) {
+                    Text(
+                        when {
+                            item.stage == ModelInstallStage.ERROR && item.downloadedBytes > 0L -> "Resume Download"
+                            item.downloadedBytes > 0L -> "Resume Download"
+                            else -> "Download Model"
+                        }
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Composable

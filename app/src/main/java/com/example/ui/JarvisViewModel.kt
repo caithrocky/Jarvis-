@@ -1,18 +1,26 @@
 package com.example.ui
 
 import android.app.Application
+import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.BatteryManager
 import android.provider.Settings
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.JarvisApplication
+import com.example.assistant.AccessibilityDiagnostics
+import com.example.assistant.AccessibilityHealthState
 import com.example.assistant.FuturisticMissionSuggestion
 import com.example.assistant.JarvisAccessibilityService
 import com.example.assistant.JarvisSystemAssistant
+import com.example.assistant.ModelInstallStage
 import com.example.assistant.NotificationVaultBridge
 import com.example.assistant.OfflineAssistantEngine
+import com.example.assistant.OfflineModelsUiState
 import com.example.data.local.AiActivityLogEntity
 import com.example.data.local.ConversationMessageEntity
 import com.example.data.local.DeviceAppKnowledgeEntity
@@ -65,6 +73,9 @@ data class JarvisUiState(
     val snackbarMessage: String? = null,
     val hasOverlayPermission: Boolean = false,
     val isScreenHelperEnabled: Boolean = false,
+    val accessibilityHealthState: AccessibilityHealthState = AccessibilityHealthState.PERMISSION_DISABLED,
+    val accessibilityStatusDetail: String = "Permission disabled in Android Accessibility Settings",
+    val accessibilityLastFailure: String? = null,
     val hasNotificationAccess: Boolean = false,
     val unreadNotificationCount: Int = 0,
     val activeUiMode: AssistantUiMode = AssistantUiMode.FULL_APP,
@@ -91,7 +102,11 @@ data class JarvisUiState(
     val isOnline: Boolean = true,
     val batteryPercent: Int = 100,
     val isCharging: Boolean = false,
-    val hudRotationTick: Int = 0
+    val hudRotationTick: Int = 0,
+    val nvidiaNimKeySource: String = "Not Set",
+    val offlineModelsState: OfflineModelsUiState = OfflineModelsUiState(),
+    val isLfmOfflineReady: Boolean = false,
+    val isVoskOfflineReady: Boolean = false
 )
 
 class JarvisViewModel(application: Application) : AndroidViewModel(application) {
@@ -105,6 +120,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private val coordinator = app.commandCoordinator
     private val deviceLearningEngine = app.deviceLearningEngine
     private val credentialStore = app.credentialStore
+    private val offlineModelManager = app.offlineModelManager
+    private val localLfmEngine = app.localLfmEngine
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     private val _uiState = MutableStateFlow(JarvisUiState())
     val uiState: StateFlow<JarvisUiState> = _uiState.asStateFlow()
@@ -133,35 +151,91 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         observeCoordinatorState()
         observeLearningAndBiometrics()
         observeLiveHudTelemetryLoop()
+        observeOfflineModelsAndConnectivity()
         refreshSystemCapabilitiesState()
         refreshApiStatuses()
     }
 
     fun refreshSystemCapabilitiesState() {
         val overlayOk = Settings.canDrawOverlays(app)
-        val screenOk = JarvisAccessibilityService.isConnected.value
+        val accSnapshot = AccessibilityDiagnostics.refreshAndEvaluate(
+            app,
+            JarvisAccessibilityService.activeInstance()
+        )
+        val screenOk = accSnapshot.state.isHealthy
         val notifOk = NotificationVaultBridge.isAccessGranted(app)
         val profile = credentialStore.getSignupProfile()
         val credentials = credentialStore.getSavedCredentials()
-        val hasRuntimeKey = !credentialStore.getDecrypted(SecureCredentialStore.KEY_NVIDIA_NIM_API_OVERRIDE).isNullOrBlank()
+        val hasRuntimeKey = credentialStore.hasNvidiaNimApiOverride()
         val hasBuildKey = SecretsConfig.hasBuildConfigNvidiaNim
         val voiceEnrolled = voiceEngine.isOwnerVoiceEnrolled()
         val hasSafeWord = credentialStore.hasDeviceSafeWord()
         val patternLen = credentialStore.getDeviceUnlockPattern().size
+        val onlineNow = OfflineAssistantEngine.isNetworkConnected(app)
         _uiState.update {
             it.copy(
                 hasOverlayPermission = overlayOk,
                 isScreenHelperEnabled = screenOk,
+                accessibilityHealthState = accSnapshot.state,
+                accessibilityStatusDetail = accSnapshot.detail,
+                accessibilityLastFailure = accSnapshot.lastFailure,
                 hasNotificationAccess = notifOk,
                 signupProfile = profile,
                 savedCredentials = credentials,
                 hasRuntimeNvidiaKeyOverride = hasRuntimeKey,
                 hasBuildConfigNvidiaKey = hasBuildKey,
+                nvidiaNimKeySource = SecretsConfig.nvidiaNimKeySourceLabel,
                 voiceEnrolled = voiceEnrolled,
                 hasDeviceSafeWord = hasSafeWord,
-                deviceUnlockPatternLength = patternLen
+                deviceUnlockPatternLength = patternLen,
+                isOnline = onlineNow
             )
         }
+    }
+
+    private fun observeOfflineModelsAndConnectivity() {
+        viewModelScope.launch {
+            offlineModelManager.state.collect { modelsState ->
+                _uiState.update { state ->
+                    state.copy(
+                        offlineModelsState = modelsState,
+                        isLfmOfflineReady = modelsState.lfmModel.stage == ModelInstallStage.INSTALLED,
+                        isVoskOfflineReady = modelsState.voskSttModel.stage == ModelInstallStage.INSTALLED
+                    )
+                }
+            }
+        }
+        runCatching {
+            val cm = app.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    _uiState.update { it.copy(isOnline = OfflineAssistantEngine.isNetworkConnected(app)) }
+                }
+
+                override fun onLost(network: Network) {
+                    _uiState.update { it.copy(isOnline = OfflineAssistantEngine.isNetworkConnected(app)) }
+                }
+
+                override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                    val hasNet = networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                        networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                    _uiState.update { it.copy(isOnline = hasNet) }
+                }
+            }
+            networkCallback = cb
+            cm.registerDefaultNetworkCallback(cb)
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        networkCallback?.let { cb ->
+            runCatching {
+                val cm = app.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                cm?.unregisterNetworkCallback(cb)
+            }
+        }
+        networkCallback = null
     }
 
     private fun observeCoordinatorState() {
@@ -216,8 +290,24 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
         viewModelScope.launch {
-            JarvisAccessibilityService.isConnected.collect { connected ->
-                _uiState.update { it.copy(isScreenHelperEnabled = connected) }
+            combine(
+                AccessibilityDiagnostics.healthState,
+                AccessibilityDiagnostics.statusDetail,
+                AccessibilityDiagnostics.lastFailureReason,
+                JarvisAccessibilityService.isConnected
+            ) { health, detail, lastFail, connected ->
+                val effectiveHealthy = health.isHealthy && connected
+                Triple(health, detail, lastFail to effectiveHealthy)
+            }.collect { (health, detail, pair) ->
+                val (lastFail, healthy) = pair
+                _uiState.update {
+                    it.copy(
+                        isScreenHelperEnabled = healthy,
+                        accessibilityHealthState = health,
+                        accessibilityStatusDetail = detail,
+                        accessibilityLastFailure = lastFail
+                    )
+                }
             }
         }
         viewModelScope.launch {
@@ -751,6 +841,81 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         coordinator.submitQuery("Sign me in to $target with my permission", fromVoice = false)
     }
 
+    fun saveNvidiaNimKey(rawKey: String) {
+        val saved = credentialStore.saveNvidiaNimApiOverride(rawKey)
+        if (!saved) {
+            _uiState.update {
+                it.copy(snackbarMessage = "Enter a valid NVIDIA NIM API key (starts with nvapi-...), Sir.")
+            }
+            return
+        }
+        _uiState.update {
+            it.copy(
+                hasRuntimeNvidiaKeyOverride = true,
+                nvidiaNimKeySource = SecretsConfig.nvidiaNimKeySourceLabel,
+                nimReachable = null,
+                diagnosticResult = null,
+                snackbarMessage = "NVIDIA NIM API key saved & encrypted in Keystore, Sir."
+            )
+        }
+        refreshApiStatuses()
+    }
+
+    fun clearNvidiaNimKeyOverride() {
+        credentialStore.clearNvidiaNimApiOverride()
+        _uiState.update {
+            it.copy(
+                hasRuntimeNvidiaKeyOverride = false,
+                nvidiaNimKeySource = SecretsConfig.nvidiaNimKeySourceLabel,
+                nimReachable = null,
+                diagnosticResult = null,
+                snackbarMessage = if (SecretsConfig.hasBuildConfigNvidiaNim) {
+                    "Cleared custom key — reverted to APK Build Secret."
+                } else {
+                    "Cleared saved NVIDIA NIM API key from Keystore."
+                }
+            )
+        }
+        refreshApiStatuses()
+    }
+
+    fun setAutoOfflineSwitchEnabled(enabled: Boolean) = viewModelScope.launch {
+        prefsRepo.setAutoOfflineSwitchEnabled(enabled)
+    }
+
+    fun downloadLfmOfflineModel() {
+        offlineModelManager.downloadLfmModel()
+        _uiState.update { it.copy(snackbarMessage = "Downloading LFM2.5 1.2B offline model (~731 MB)...") }
+    }
+
+    fun cancelLfmDownload() {
+        offlineModelManager.cancelLfmDownload()
+        _uiState.update { it.copy(snackbarMessage = "Paused LFM2.5 1.2B download.") }
+    }
+
+    fun deleteLfmOfflineModel() {
+        viewModelScope.launch {
+            localLfmEngine.unloadModel()
+            offlineModelManager.deleteLfmModel()
+            _uiState.update { it.copy(snackbarMessage = "Removed LFM2.5 1.2B offline model from device.") }
+        }
+    }
+
+    fun downloadVoskOfflineModel() {
+        offlineModelManager.downloadVoskSttModel()
+        _uiState.update { it.copy(snackbarMessage = "Downloading Vosk offline voice recognition (~41 MB)...") }
+    }
+
+    fun cancelVoskDownload() {
+        offlineModelManager.cancelVoskDownload()
+        _uiState.update { it.copy(snackbarMessage = "Cancelled offline voice download.") }
+    }
+
+    fun deleteVoskOfflineModel() {
+        offlineModelManager.deleteVoskSttModel()
+        _uiState.update { it.copy(snackbarMessage = "Removed offline voice recognition model from device.") }
+    }
+
     fun previewJarvisVoice() {
         if (voiceEngine.isMediaVolumeZero()) {
             _uiState.update { it.copy(snackbarMessage = "Your device media volume is at 0 — turn volume up to hear JARVIS.") }
@@ -782,6 +947,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     fun refreshApiStatuses() {
         val state = _uiState.value
+        val source = SecretsConfig.nvidiaNimKeySourceLabel
         val statuses = listOf(
             ApiIntegrationStatus(
                 id = "nvidia_nim",
@@ -789,14 +955,21 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 configured = SecretsConfig.hasNvidiaNim,
                 reachable = state.nimReachable,
                 statusText = when {
-                    SecretsConfig.hasNvidiaNim -> "Configured in App Build Secrets"
-                    else -> "Missing in This APK Build (Rebuild Required)"
+                    SecretsConfig.hasNvidiaNim -> "Configured ($source)"
+                    else -> "Missing Key — enter below or set GitHub Secret"
                 },
-                obtainGuide = "Set NVIDIA_NIM_API_KEY in AI Studio Secrets and reinstall the rebuilt APK, or add NVIDIA_NIM_API_KEY to GitHub Repo Actions Secrets for GitHub Releases.",
+                obtainGuide = "Save your NVIDIA NIM key above inside Settings (persists encrypted across GitHub APK updates), or set NVIDIA_NIM_API_KEY in AI Studio / GitHub Repo Actions Secrets.",
                 secretKeys = listOf("NVIDIA_NIM_API_KEY")
             )
         )
-        _uiState.update { it.copy(apiStatuses = statuses) }
+        _uiState.update {
+            it.copy(
+                apiStatuses = statuses,
+                nvidiaNimKeySource = source,
+                hasRuntimeNvidiaKeyOverride = SecretsConfig.hasRuntimeNvidiaNimOverride,
+                hasBuildConfigNvidiaKey = SecretsConfig.hasBuildConfigNvidiaNim
+            )
+        }
     }
 
     private data class Tuple5<A, B, C, D, E>(val a: A, val b: B, val c: C, val d: D, val e: E)

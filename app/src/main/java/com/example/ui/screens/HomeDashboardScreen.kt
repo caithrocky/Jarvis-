@@ -246,7 +246,11 @@ fun HomeDashboardScreen(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = buildString {
-                            append(if (uiState.isOnline) "NIM ONLINE" else "OFFLINE CORE")
+                            when {
+                                uiState.isOnline -> append("NIM ONLINE")
+                                uiState.isLfmOfflineReady -> append("OFFLINE • LFM2.5 1.2B")
+                                else -> append("OFFLINE CORE")
+                            }
                             append(" • ${uiState.batteryPercent}%")
                             if (activeAutomations.isNotEmpty()) {
                                 append(" • ${activeAutomations.size} AUTO")

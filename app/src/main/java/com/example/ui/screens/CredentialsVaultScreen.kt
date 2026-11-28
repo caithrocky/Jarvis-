@@ -37,6 +37,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import com.example.assistant.AccessibilityHealthState
 import com.example.security.SecureCredentialStore
 import com.example.ui.JarvisUiState
 import com.example.ui.components.HudGlassCard
@@ -112,8 +113,17 @@ fun CredentialsVaultScreen(
                         Text("On-Device AES-256 Encrypted", style = MaterialTheme.typography.titleMedium)
                     }
                     StatusBadge(
-                        text = if (uiState.isScreenHelperEnabled && uiState.hasOverlayPermission) "PLUGIN READY" else "SETUP",
-                        color = if (uiState.isScreenHelperEnabled && uiState.hasOverlayPermission) ProfitEmerald else WarningAmber
+                        text = when {
+                            uiState.isScreenHelperEnabled && uiState.hasOverlayPermission -> "PLUGIN READY"
+                            uiState.accessibilityHealthState == AccessibilityHealthState.MALFUNCTION_DETECTED -> "REPAIR"
+                            else -> "SETUP"
+                        },
+                        color = when {
+                            uiState.isScreenHelperEnabled && uiState.hasOverlayPermission -> ProfitEmerald
+                            uiState.accessibilityHealthState == AccessibilityHealthState.MALFUNCTION_DETECTED ->
+                                MaterialTheme.colorScheme.error
+                            else -> WarningAmber
+                        }
                     )
                 }
                 Spacer(Modifier.height(8.dp))
@@ -134,7 +144,14 @@ fun CredentialsVaultScreen(
                             .weight(1f)
                             .testTag("vault_screen_helper_btn")
                     ) {
-                        Text(if (uiState.isScreenHelperEnabled) "Helper: ON" else "Enable Helper")
+                        val helperText = when (uiState.accessibilityHealthState) {
+                            AccessibilityHealthState.OPERATIONAL -> "Helper: Operational"
+                            AccessibilityHealthState.CONNECTED -> "Helper: Connected"
+                            AccessibilityHealthState.MALFUNCTION_DETECTED -> "Repair Helper"
+                            AccessibilityHealthState.PERMISSION_ENABLED_NOT_CONNECTED -> "Rebind Helper"
+                            else -> "Enable Helper"
+                        }
+                        Text(helperText)
                     }
                 }
             }

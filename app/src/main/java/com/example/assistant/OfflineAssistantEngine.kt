@@ -98,9 +98,15 @@ object OfflineAssistantEngine {
         // 4. Learned apps & workflows recall
         if (isLearnedAppsQuery(lower)) {
             val topApps = learnedApps.sortedByDescending { it.usageCount }.take(5).joinToString(", ") { it.appName }
+            val cats = learnedApps.groupingBy { it.category }.eachCount()
+                .entries.sortedByDescending { it.value }
+                .take(5)
+                .joinToString(", ") { "${it.key} (${it.value})" }
             val wfCount = learnedWorkflows.size
             val msg = buildString {
-                append("Operating locally, Sir. I have indexed ${learnedApps.size} apps and $wfCount workflows on your device.")
+                append("Operating locally, Sir. I have indexed ${learnedApps.size} apps and $wfCount workflows across your device")
+                if (cats.isNotBlank()) append(" ($cats)")
+                append(".")
                 if (topApps.isNotBlank()) append(" Top apps: $topApps.")
             }
             return msg to "Offline Device Map"

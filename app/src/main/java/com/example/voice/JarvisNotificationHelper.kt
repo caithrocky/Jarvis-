@@ -96,6 +96,8 @@ object JarvisNotificationHelper {
             .setContentIntent(openIntent)
             .build()
 
-        NotificationManagerCompat.from(context).notify(id, notification)
+        runCatching {
+            NotificationManagerCompat.from(context).notify(id, notification)
+        }
     }
 }

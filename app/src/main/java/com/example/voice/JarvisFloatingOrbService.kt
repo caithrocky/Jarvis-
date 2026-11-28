@@ -30,6 +30,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import com.example.JarvisApplication
 import com.example.MainActivity
+import com.example.assistant.AccessibilityDiagnostics
 import com.example.assistant.JarvisAccessibilityService
 import com.example.assistant.MiniOrbStateMapper
 import com.example.domain.model.MiniOrbVisualState
@@ -53,8 +54,12 @@ import kotlin.math.sin
  */
 class JarvisFloatingOrbService : Service() {
 
-    private lateinit var windowManager: WindowManager
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var windowManager: WindowManager? = null
+    private val serviceScope = CoroutineScope(
+        SupervisorJob() +
+            Dispatchers.Main.immediate +
+            AccessibilityDiagnostics.coroutineExceptionHandler("JarvisFloatingOrbService")
+    )
 
     private var rootContainer: LinearLayout? = null
     private var orbView: DimensionalCompanionOrbView? = null
@@ -72,7 +77,8 @@ class JarvisFloatingOrbService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        AccessibilityDiagnostics.installUncaughtExceptionReporter(applicationContext ?: this)
+        windowManager = getSystemService(Context.WINDOW_SERVICE) as? WindowManager
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -86,10 +92,20 @@ class JarvisFloatingOrbService : Service() {
             return START_NOT_STICKY
         }
 
-        val app = application as JarvisApplication
+        val app = application as? JarvisApplication
+        if (app == null) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
         val expandOnStart = intent?.getBooleanExtra(EXTRA_EXPAND, false) == true
         if (rootContainer == null) {
-            createOverlayViews()
+            val created = runCatching { createOverlayViews() }
+                .onFailure { AccessibilityDiagnostics.recordNonFatalError("FloatingOrb.createOverlayViews", it, this) }
+                .getOrDefault(false)
+            if (!created) {
+                stopSelf()
+                return START_NOT_STICKY
+            }
         }
         setExpanded(expandOnStart)
         app.commandCoordinator.orbLifecycle.setOnAutoSleep {
@@ -105,7 +121,7 @@ class JarvisFloatingOrbService : Service() {
         serviceScope.cancel()
         orbView?.stopAnim()
         rootContainer?.let { view ->
-            runCatching { windowManager.removeView(view) }
+            runCatching { windowManager?.removeView(view) }
         }
         rootContainer = null
         super.onDestroy()
@@ -120,8 +136,9 @@ class JarvisFloatingOrbService : Service() {
     ).toInt()
 
     @SuppressLint("ClickableViewAccessibility")
-    private fun createOverlayViews() {
-        val app = application as JarvisApplication
+    private fun createOverlayViews(): Boolean {
+        val wm = windowManager ?: return false
+        val app = application as? JarvisApplication ?: return false
         val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         } else {
@@ -178,7 +195,7 @@ class JarvisFloatingOrbService : Service() {
                         moved = true
                         params.x = initialX + dx
                         params.y = initialY + dy
-                        runCatching { windowManager.updateViewLayout(container, params) }
+                        runCatching { wm.updateViewLayout(container, params) }
                     }
                     true
                 }
@@ -389,7 +406,18 @@ class JarvisFloatingOrbService : Service() {
         micActionBtn = speakBtn
         muteActionBtn = muteBtn
 
-        windowManager.addView(container, params)
+        val added = runCatching {
+            wm.addView(container, params)
+            true
+        }.onFailure { err ->
+            AccessibilityDiagnostics.recordNonFatalError("FloatingOrb.addView", err, this)
+        }.getOrDefault(false)
+        if (!added) {
+            rootContainer = null
+            orbView = null
+            bubbleCard = null
+            return false
+        }
         orb.startAnim()
 
         serviceScope.launch {
@@ -409,7 +437,7 @@ class JarvisFloatingOrbService : Service() {
                         p.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON.inv()
                     }
                     runCatching {
-                        rootContainer?.let { windowManager.updateViewLayout(it, p) }
+                        rootContainer?.let { wm.updateViewLayout(it, p) }
                     }
                 }
             }
@@ -552,6 +580,7 @@ class JarvisFloatingOrbService : Service() {
                 }
             }
         }
+        return true
     }
 
     private fun createMiniButton(
@@ -928,14 +957,18 @@ class JarvisFloatingOrbService : Service() {
                 putExtra(EXTRA_EXPAND, expandBubble)
                 putExtra(EXTRA_START_LISTEN, startListening)
             }
-            context.startService(intent)
+            runCatching { context.startService(intent) }
+                .onFailure { err ->
+                    AccessibilityDiagnostics.recordNonFatalError("FloatingOrb.start", err, context)
+                }
         }
 
         fun stop(context: Context) {
-            val intent = Intent(context, JarvisFloatingOrbService::class.java).apply {
-                action = ACTION_STOP
-            }
-            context.startService(intent)
+            val intent = Intent(context, JarvisFloatingOrbService::class.java)
+            runCatching { context.stopService(intent) }
+                .onFailure { err ->
+                    AccessibilityDiagnostics.recordNonFatalError("FloatingOrb.stop", err, context)
+                }
         }
     }
 }

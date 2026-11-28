@@ -88,6 +88,8 @@ jobs:
           if [ -n "$NVIDIA_NIM_API_KEY" ]; then
             printf 'NVIDIA_NIM_API_KEY=%s\n' "$NVIDIA_NIM_API_KEY" >> .env
             echo "Configured NVIDIA_NIM_API_KEY from GitHub Secrets"
+          else
+            echo "::warning::NVIDIA_NIM_API_KEY secret is not set in GitHub Repo Settings -> Secrets and variables -> Actions. Users can still enter their key inside JARVIS Settings."
           fi
 
       - name: Build Jarvis debug APK

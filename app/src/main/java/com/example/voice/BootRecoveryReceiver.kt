@@ -5,8 +5,10 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.core.content.ContextCompat
 import com.example.JarvisApplication
+import com.example.assistant.AccessibilityDiagnostics
 import com.example.assistant.DeviceLearningEngine
 import com.example.assistant.ScheduledAutomationEngine
 import kotlinx.coroutines.CoroutineScope
@@ -31,23 +33,31 @@ class BootRecoveryReceiver : BroadcastReceiver() {
         }
 
         val pendingResult = goAsync()
-        CoroutineScope(Dispatchers.IO).launch {
+        CoroutineScope(
+            Dispatchers.IO + AccessibilityDiagnostics.coroutineExceptionHandler("BootRecoveryReceiver")
+        ).launch {
             try {
                 val app = context.applicationContext as? JarvisApplication
-                DeviceLearningEngine.scheduleDailyStudy(context.applicationContext)
+                runCatching { DeviceLearningEngine.scheduleDailyStudy(context.applicationContext) }
 
-                app?.localRepository?.getActiveScheduledAutomations()?.forEach { task ->
-                    ScheduledAutomationEngine.scheduleAlarm(context.applicationContext, task)
+                runCatching {
+                    app?.localRepository?.getActiveScheduledAutomations()?.forEach { task ->
+                        ScheduledAutomationEngine.scheduleAlarm(context.applicationContext, task)
+                    }
                 }
 
-                val wakeEnabled = app?.preferencesRepository?.settingsFlow?.first()?.wakeWordEnabled == true
+                val wakeEnabled = runCatching {
+                    app?.preferencesRepository?.settingsFlow?.first()?.wakeWordEnabled == true
+                }.getOrDefault(false)
                 val hasMic = ContextCompat.checkSelfPermission(
                     context,
                     Manifest.permission.RECORD_AUDIO
                 ) == PackageManager.PERMISSION_GRANTED
 
-                if (wakeEnabled && hasMic) {
+                // Android 14+ (API 34+) prohibits starting a microphone foreground service from BOOT_COMPLETED
+                if (wakeEnabled && hasMic && Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                     runCatching { JarvisVoiceService.start(context.applicationContext) }
+                        .onFailure { AccessibilityDiagnostics.recordNonFatalError("BootRecovery.startVoice", it) }
                 }
             } finally {
                 pendingResult.finish()

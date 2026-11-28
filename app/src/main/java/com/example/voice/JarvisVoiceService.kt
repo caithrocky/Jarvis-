@@ -12,6 +12,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import com.example.JarvisApplication
+import com.example.assistant.AccessibilityDiagnostics
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -22,23 +23,32 @@ import kotlinx.coroutines.launch
 
 class JarvisVoiceService : Service() {
 
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val serviceScope = CoroutineScope(
+        SupervisorJob() +
+            Dispatchers.Main.immediate +
+            AccessibilityDiagnostics.coroutineExceptionHandler("JarvisVoiceService")
+    )
     private var sleepAudioWakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
+        AccessibilityDiagnostics.installUncaughtExceptionReporter(applicationContext ?: this)
         JarvisNotificationHelper.ensureChannels(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val app = application as JarvisApplication
+        val app = application as? JarvisApplication
+        if (app == null) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_STOP) {
             releaseSleepWakeLock()
             serviceScope.launch {
-                app.preferencesRepository.setWakeWordEnabled(false)
+                runCatching { app.preferencesRepository.setWakeWordEnabled(false) }
             }
-            app.voiceEngine.stopAllListening()
-            stopForeground(STOP_FOREGROUND_REMOVE)
+            runCatching { app.voiceEngine.stopAllListening() }
+            runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
             stopSelf()
             return START_NOT_STICKY
         }
@@ -47,14 +57,27 @@ class JarvisVoiceService : Service() {
             this,
             "Say \"Hey JARVIS\" anytime — active even on sleep"
         )
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                JarvisNotificationHelper.VOICE_NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            )
-        } else {
-            startForeground(JarvisNotificationHelper.VOICE_NOTIFICATION_ID, notification)
+        val foregroundStarted = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    JarvisNotificationHelper.VOICE_NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                )
+            } else {
+                startForeground(JarvisNotificationHelper.VOICE_NOTIFICATION_ID, notification)
+            }
+            true
+        }.onFailure { err ->
+            // On Android 14+ (API 34+), launching a microphone FGS from background/boot throws ForegroundServiceStartNotAllowedException.
+            // Stop cleanly rather than crashing the shared process hosting JarvisAccessibilityService.
+            AccessibilityDiagnostics.recordNonFatalError("JarvisVoiceService.startForeground", err, this)
+        }.getOrDefault(false)
+
+        if (!foregroundStarted) {
+            releaseSleepWakeLock()
+            stopSelf()
+            return START_NOT_STICKY
         }
 
         app.commandCoordinator.attachVoiceEngineCallbacks()
@@ -119,6 +142,8 @@ class JarvisVoiceService : Service() {
         super.onTaskRemoved(rootIntent)
         val app = application as? JarvisApplication ?: return
         if (!app.voiceEngine.hasMicPermission() || app.voiceEngine.isMuted.value) return
+        // Android 14+ forbids background/alarm starts of microphone FGS without WHILE_IN_USE; skip to avoid crash loops
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
 
         val alarmManager = getSystemService(Context.ALARM_SERVICE) as? AlarmManager
         val restartIntent = Intent(applicationContext, BootRecoveryReceiver::class.java).apply {

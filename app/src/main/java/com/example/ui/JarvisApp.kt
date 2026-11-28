@@ -90,6 +90,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.JarvisApplication
+import com.example.assistant.AccessibilityHealthState
 import com.example.data.local.JarvisUserSettings
 import com.example.domain.model.AssistantUiMode
 import com.example.ui.components.HudGlassCard
@@ -423,7 +424,16 @@ fun JarvisApp(viewModel: JarvisViewModel) {
                                             onToggleDeviceUnlockEnabled = viewModel::setDeviceUnlockEnabled,
                                             onSaveSafeWord = viewModel::saveDeviceUnlockSafeWord,
                                             onSaveUnlockPattern = viewModel::saveDeviceUnlockPattern,
-                                            onClearUnlockCredentials = viewModel::clearDeviceUnlockCredentials
+                                            onClearUnlockCredentials = viewModel::clearDeviceUnlockCredentials,
+                                            onSaveNvidiaNimKey = viewModel::saveNvidiaNimKey,
+                                            onClearNvidiaNimKeyOverride = viewModel::clearNvidiaNimKeyOverride,
+                                            onToggleAutoOfflineSwitch = viewModel::setAutoOfflineSwitchEnabled,
+                                            onDownloadLfmModel = viewModel::downloadLfmOfflineModel,
+                                            onCancelLfmDownload = viewModel::cancelLfmDownload,
+                                            onDeleteLfmModel = viewModel::deleteLfmOfflineModel,
+                                            onDownloadVoskModel = viewModel::downloadVoskOfflineModel,
+                                            onCancelVoskDownload = viewModel::cancelVoskDownload,
+                                            onDeleteVoskModel = viewModel::deleteVoskOfflineModel
                                         )
 
                                         JarvisSection.HOME -> Unit
@@ -739,26 +749,41 @@ private fun JarvisFeaturesDrawer(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    val accState = uiState.accessibilityHealthState
+                    val accTint = when (accState) {
+                        AccessibilityHealthState.OPERATIONAL, AccessibilityHealthState.CONNECTED -> ProfitEmerald
+                        AccessibilityHealthState.CONNECTING -> ArcCyan
+                        AccessibilityHealthState.MALFUNCTION_DETECTED -> MaterialTheme.colorScheme.error
+                        else -> WarningAmber
+                    }
+                    val accBadge = when (accState) {
+                        AccessibilityHealthState.OPERATIONAL -> "OPERATIONAL"
+                        AccessibilityHealthState.CONNECTED -> "CONNECTED"
+                        AccessibilityHealthState.CONNECTING -> "CONNECTING"
+                        AccessibilityHealthState.MALFUNCTION_DETECTED -> "MALFUNCTION"
+                        AccessibilityHealthState.PERMISSION_ENABLED_NOT_CONNECTED -> "REBIND"
+                        AccessibilityHealthState.PERMISSION_DISABLED -> "SETUP"
+                    }
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                         Icon(
                             imageVector = Icons.Filled.AccessibilityNew,
                             contentDescription = null,
-                            tint = if (uiState.isScreenHelperEnabled) ProfitEmerald else WarningAmber,
+                            tint = accTint,
                             modifier = Modifier.size(20.dp)
                         )
                         Spacer(Modifier.width(8.dp))
                         Column {
                             Text("Screen Control", style = MaterialTheme.typography.bodyMedium, color = Color.White)
                             Text(
-                                text = if (uiState.isScreenHelperEnabled) "Reads screens & automates apps" else "Tap to enable",
+                                text = uiState.accessibilityStatusDetail,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = jc.mutedSlate
                             )
                         }
                     }
                     StatusBadge(
-                        text = if (uiState.isScreenHelperEnabled) "READY" else "SETUP",
-                        color = if (uiState.isScreenHelperEnabled) ProfitEmerald else WarningAmber
+                        text = accBadge,
+                        color = accTint
                     )
                 }
 

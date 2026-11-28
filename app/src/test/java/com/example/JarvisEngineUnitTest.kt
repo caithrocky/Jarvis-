@@ -662,4 +662,307 @@ class JarvisEngineUnitTest {
         assertTrue(suggestions.any { it.id == "triage_alerts" })
         assertTrue(suggestions.any { it.id == "schedule_morning_brief" })
     }
+
+    @Test
+    fun `lfm25 engine builds compact system prompt, formats history, and cleans model tags`() {
+        val sysPrompt = com.example.assistant.LocalLfmLlmEngine.buildCompactSystemPrompt(
+            memories = listOf(
+                com.example.data.local.MemoryFactEntity(
+                    id = 1L,
+                    category = "preference",
+                    summary = "Prefers concise responses",
+                    createdAtMs = 1L
+                )
+            ),
+            snapshot = com.example.data.remote.NvidiaNimClient.LiveContextSnapshot(
+                activeScreenSummary = "Settings screen",
+                deviceKnowledgeSummary = "12 apps indexed"
+            )
+        )
+        assertTrue(sysPrompt.contains("LFM2.5-1.2B"))
+        assertTrue(sysPrompt.contains("Prefers concise responses"))
+        assertTrue(sysPrompt.contains("12 apps indexed"))
+
+        val history = listOf(
+            com.example.data.local.ConversationMessageEntity(id = 1L, role = "user", content = "Hello JARVIS", modelUsed = "user", isVoice = true, timestampMs = 10L),
+            com.example.data.local.ConversationMessageEntity(id = 2L, role = "assistant", content = "Good evening, Sir.", modelUsed = "LFM2.5-1.2B", isVoice = true, timestampMs = 20L),
+            com.example.data.local.ConversationMessageEntity(id = 3L, role = "user", content = "What is 9 times 9?", modelUsed = "user", isVoice = true, timestampMs = 30L)
+        )
+        val formatted = com.example.assistant.LocalLfmLlmEngine.formatPromptWithHistory(
+            "What is 9 times 9?",
+            history
+        )
+        assertTrue(formatted.contains("Sir: Hello JARVIS"))
+        assertTrue(formatted.contains("JARVIS: Good evening, Sir."))
+        assertTrue(formatted.endsWith("Sir: What is 9 times 9?"))
+
+        val cleaned = com.example.assistant.LocalLfmLlmEngine.cleanLfmOutput(
+            "<think>internal reasoning</think>Assistant: That equals 81, Sir.<|im_end|>"
+        )
+        assertEquals("That equals 81, Sir.", cleaned)
+    }
+
+    @Test
+    fun `vosk offline speech recognizer parses partial and final json safely`() {
+        assertEquals(
+            "hey jarvis",
+            com.example.voice.VoskOfflineSpeechRecognizer.parseVoskField(
+                """{"partial" : " hey jarvis "}""",
+                "partial"
+            )
+        )
+        assertEquals(
+            "open settings",
+            com.example.voice.VoskOfflineSpeechRecognizer.parseVoskField(
+                """{"text" : "open settings"}""",
+                "text"
+            )
+        )
+        assertEquals(
+            "",
+            com.example.voice.VoskOfflineSpeechRecognizer.parseVoskField("not-valid-json", "text")
+        )
+    }
+
+    @Test
+    fun `offline model manager extracts valid zip stripping top folder and blocks zip slip`() {
+        val tempRoot = java.nio.file.Files.createTempDirectory("jarvis_zip_test").toFile()
+        try {
+            val validZip = java.io.File(tempRoot, "valid.zip")
+            java.util.zip.ZipOutputStream(java.io.FileOutputStream(validZip)).use { zos ->
+                zos.putNextEntry(java.util.zip.ZipEntry("vosk-model-small-en-us-0.15/conf/model.conf"))
+                zos.write("beam=13.0\n".toByteArray())
+                zos.closeEntry()
+            }
+            val destValid = java.io.File(tempRoot, "dest_valid").apply { mkdirs() }
+            com.example.assistant.OfflineModelManager.extractZipSafely(validZip, destValid, stripTopFolder = true)
+            assertTrue(java.io.File(destValid, "conf/model.conf").exists())
+
+            val evilZip = java.io.File(tempRoot, "evil.zip")
+            java.util.zip.ZipOutputStream(java.io.FileOutputStream(evilZip)).use { zos ->
+                zos.putNextEntry(java.util.zip.ZipEntry("top/../../escaped.txt"))
+                zos.write("bad".toByteArray())
+                zos.closeEntry()
+            }
+            val destEvil = java.io.File(tempRoot, "dest_evil").apply { mkdirs() }
+            var blocked = false
+            try {
+                com.example.assistant.OfflineModelManager.extractZipSafely(evilZip, destEvil, stripTopFolder = true)
+            } catch (_: SecurityException) {
+                blocked = true
+            }
+            assertTrue("Zip-Slip path traversal must throw SecurityException", blocked)
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `secrets config rejects placeholders and strips quotes on nvidia nim keys`() {
+        assertNull(SecretsConfig.cleanSecret("MY_NVIDIA_NIM_API_KEY"))
+        assertNull(SecretsConfig.cleanSecret(""))
+        assertEquals("nvapi-sample-1234", SecretsConfig.cleanSecret("  \"Bearer nvapi-sample-1234\"  "))
+    }
+
+    @Test
+    fun `accessibility diagnostics resolves all 6 distinct real health states without false operational status`() {
+        assertEquals(
+            com.example.assistant.AccessibilityHealthState.PERMISSION_DISABLED,
+            com.example.assistant.AccessibilityDiagnostics.resolveHealthState(
+                permissionEnabledInSettings = false,
+                isConnecting = false,
+                isServiceConnected = false,
+                hasOperationalProof = false,
+                malfunctionRecorded = false
+            )
+        )
+        assertEquals(
+            com.example.assistant.AccessibilityHealthState.PERMISSION_ENABLED_NOT_CONNECTED,
+            com.example.assistant.AccessibilityDiagnostics.resolveHealthState(
+                permissionEnabledInSettings = true,
+                isConnecting = false,
+                isServiceConnected = false,
+                hasOperationalProof = false,
+                malfunctionRecorded = false
+            )
+        )
+        assertEquals(
+            com.example.assistant.AccessibilityHealthState.CONNECTING,
+            com.example.assistant.AccessibilityDiagnostics.resolveHealthState(
+                permissionEnabledInSettings = true,
+                isConnecting = true,
+                isServiceConnected = false,
+                hasOperationalProof = false,
+                malfunctionRecorded = false
+            )
+        )
+        assertEquals(
+            com.example.assistant.AccessibilityHealthState.CONNECTED,
+            com.example.assistant.AccessibilityDiagnostics.resolveHealthState(
+                permissionEnabledInSettings = true,
+                isConnecting = false,
+                isServiceConnected = true,
+                hasOperationalProof = false,
+                malfunctionRecorded = false
+            )
+        )
+        assertEquals(
+            com.example.assistant.AccessibilityHealthState.OPERATIONAL,
+            com.example.assistant.AccessibilityDiagnostics.resolveHealthState(
+                permissionEnabledInSettings = true,
+                isConnecting = false,
+                isServiceConnected = true,
+                hasOperationalProof = true,
+                malfunctionRecorded = false
+            )
+        )
+        assertEquals(
+            com.example.assistant.AccessibilityHealthState.MALFUNCTION_DETECTED,
+            com.example.assistant.AccessibilityDiagnostics.resolveHealthState(
+                permissionEnabledInSettings = true,
+                isConnecting = false,
+                isServiceConnected = false,
+                hasOperationalProof = false,
+                malfunctionRecorded = true
+            )
+        )
+        assertEquals(
+            com.example.assistant.AccessibilityHealthState.MALFUNCTION_DETECTED,
+            com.example.assistant.AccessibilityDiagnostics.resolveHealthState(
+                permissionEnabledInSettings = true,
+                isConnecting = false,
+                isServiceConnected = true,
+                hasOperationalProof = true,
+                malfunctionRecorded = true
+            )
+        )
+    }
+
+    @Test
+    fun `accessibility diagnostics redacts quoted strings in recorded non-fatal error summaries`() {
+        com.example.assistant.AccessibilityDiagnostics.resetForTesting()
+        com.example.assistant.AccessibilityDiagnostics.recordNonFatalError(
+            "clickNodeByText",
+            IllegalStateException("Node text \"secret-otp-9942\" is stale")
+        )
+        val logs = com.example.assistant.AccessibilityDiagnostics.recentEvents.value
+        assertTrue(logs.any { it.contains("clickNodeByText") && !it.contains("secret-otp-9942") && it.contains("<redacted>") })
+    }
+
+    @Test
+    fun `system assistant parses conversational intent, settings close and toggle, multi-touch, free-roam scroll, and capability delegation`() {
+        // Conversational lock/sleep
+        assertEquals(SystemIntentKind.DEVICE_POWER, JarvisSystemAssistant.parseCommand("Lock it")?.kind)
+        assertEquals("sleep", JarvisSystemAssistant.parseCommand("I'm done using my phone")?.primaryArg)
+
+        // Settings close & toggle + preserved open
+        val closeWifi = JarvisSystemAssistant.parseCommand("Close Wi-Fi settings")
+        assertEquals(SystemIntentKind.DEVICE_SETTING_CONTROL, closeWifi?.kind)
+        assertEquals("wifi", closeWifi?.primaryArg)
+        assertEquals("close", closeWifi?.secondaryArg)
+
+        val offBt = JarvisSystemAssistant.parseCommand("Turn off Bluetooth")
+        assertEquals(SystemIntentKind.DEVICE_SETTING_CONTROL, offBt?.kind)
+        assertEquals("bluetooth", offBt?.primaryArg)
+        assertEquals("off", offBt?.secondaryArg)
+
+        val darkOn = JarvisSystemAssistant.parseCommand("Enable dark mode")
+        assertEquals(SystemIntentKind.DEVICE_SETTING_CONTROL, darkOn?.kind)
+        assertEquals("dark theme", darkOn?.primaryArg)
+        assertEquals("on", darkOn?.secondaryArg)
+
+        val openWifi = JarvisSystemAssistant.parseCommand("Open Wi-Fi settings")
+        assertEquals(SystemIntentKind.OPEN_SETTINGS, openWifi?.kind)
+        assertEquals("wifi", openWifi?.primaryArg)
+
+        // Show tap / scrolling toggles
+        val showScrolling = JarvisSystemAssistant.parseCommand("Show scrolling")
+        assertEquals(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, showScrolling?.kind)
+        assertEquals("scroll", showScrolling?.primaryArg)
+        assertEquals("true", showScrolling?.secondaryArg)
+
+        val hideTaps = JarvisSystemAssistant.parseCommand("Turn off taps")
+        assertEquals(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, hideTaps?.kind)
+        assertEquals("tap", hideTaps?.primaryArg)
+        assertEquals("false", hideTaps?.secondaryArg)
+
+        // Multi-touch
+        val zoomIn = JarvisSystemAssistant.parseCommand("Zoom in")
+        assertEquals(SystemIntentKind.MULTI_TOUCH, zoomIn?.kind)
+        assertEquals("pinch_out", zoomIn?.primaryArg)
+
+        val twoFingerLeft = JarvisSystemAssistant.parseCommand("Two-finger scroll left")
+        assertEquals(SystemIntentKind.MULTI_TOUCH, twoFingerLeft?.kind)
+        assertEquals("two_finger_scroll_left", twoFingerLeft?.primaryArg)
+
+        val threeTap = JarvisSystemAssistant.parseCommand("Three-finger tap")
+        assertEquals(SystemIntentKind.MULTI_TOUCH, threeTap?.kind)
+        assertEquals("multi_finger_tap", threeTap?.primaryArg)
+        assertEquals("3", threeTap?.secondaryArg)
+
+        // Free-roam scroll (horizontal, diagonal, continuous, stop, top)
+        val scrollLeft = JarvisSystemAssistant.parseCommand("Scroll left")
+        assertEquals(SystemIntentKind.FREE_ROAM_SCROLL, scrollLeft?.kind)
+        assertEquals("left", scrollLeft?.primaryArg)
+
+        val diagScroll = JarvisSystemAssistant.parseCommand("Scroll diagonally up left")
+        assertEquals(SystemIntentKind.FREE_ROAM_SCROLL, diagScroll?.kind)
+        assertEquals("up_left", diagScroll?.primaryArg)
+
+        val keepDown = JarvisSystemAssistant.parseCommand("Keep scrolling down")
+        assertEquals(SystemIntentKind.FREE_ROAM_SCROLL, keepDown?.kind)
+        assertEquals("down", keepDown?.primaryArg)
+        assertEquals("continuous", keepDown?.secondaryArg)
+
+        val stopScroll = JarvisSystemAssistant.parseCommand("Stop scrolling")
+        assertEquals(SystemIntentKind.FREE_ROAM_SCROLL, stopScroll?.kind)
+        assertEquals("stop", stopScroll?.primaryArg)
+
+        val topScroll = JarvisSystemAssistant.parseCommand("Scroll to top")
+        assertEquals(SystemIntentKind.FREE_ROAM_SCROLL, topScroll?.kind)
+        assertEquals("top", topScroll?.primaryArg)
+
+        // Capability delegation (alarm without time, trading, marketing, entertainment)
+        val vagueAlarm = JarvisSystemAssistant.parseCommand("Set an alarm for me")
+        assertEquals(SystemIntentKind.DELEGATE_CAPABILITY, vagueAlarm?.kind)
+        assertEquals("alarm", vagueAlarm?.primaryArg)
+
+        val tradeIntent = JarvisSystemAssistant.parseCommand("I want to trade")
+        assertEquals(SystemIntentKind.DELEGATE_CAPABILITY, tradeIntent?.kind)
+        assertEquals("trading", tradeIntent?.primaryArg)
+
+        val marketingApp = JarvisSystemAssistant.parseCommand("Open a marketing app")
+        assertEquals(SystemIntentKind.DELEGATE_CAPABILITY, marketingApp?.kind)
+        assertEquals("marketing", marketingApp?.primaryArg)
+
+        val entApp = JarvisSystemAssistant.parseCommand("Open an entertainment app")
+        assertEquals(SystemIntentKind.DELEGATE_CAPABILITY, entApp?.kind)
+        assertEquals("entertainment", entApp?.primaryArg)
+
+        // New AI action tags
+        val (cleanReply, parsedTags) = JarvisSystemAssistant.extractAndStripAiActions(
+            "Right away, Sir. [ACTION:DEVICE_SETTING|wifi|close] [ACTION:MULTI_TOUCH|pinch_out|1.2] [ACTION:FREE_SCROLL|right|continuous] [ACTION:VISUAL_FEEDBACK|scroll|on] [ACTION:DELEGATE_CAPABILITY|trading|check charts]"
+        )
+        assertEquals("Right away, Sir.", cleanReply)
+        assertEquals(5, parsedTags.size)
+        assertEquals(SystemIntentKind.DEVICE_SETTING_CONTROL, parsedTags[0].kind)
+        assertEquals("wifi", parsedTags[0].primaryArg)
+        assertEquals("close", parsedTags[0].secondaryArg)
+        assertEquals(SystemIntentKind.MULTI_TOUCH, parsedTags[1].kind)
+        assertEquals(SystemIntentKind.FREE_ROAM_SCROLL, parsedTags[2].kind)
+        assertEquals("right", parsedTags[2].primaryArg)
+        assertEquals("continuous", parsedTags[2].secondaryArg)
+        assertEquals(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, parsedTags[3].kind)
+        assertEquals(SystemIntentKind.DELEGATE_CAPABILITY, parsedTags[4].kind)
+    }
+
+    @Test
+    fun `device learning classifies trading, marketing, entertainment, messaging, social, and system apps`() {
+        assertEquals("Trading", com.example.assistant.DeviceLearningEngine.classifyApp("TradingView", "com.tradingview.tradingviewapp"))
+        assertEquals("Marketing", com.example.assistant.DeviceLearningEngine.classifyApp("Canva", "com.canva.editor"))
+        assertEquals("Entertainment", com.example.assistant.DeviceLearningEngine.classifyApp("Netflix", "com.netflix.mediaclient"))
+        assertEquals("Messaging", com.example.assistant.DeviceLearningEngine.classifyApp("WhatsApp", "com.whatsapp"))
+        assertEquals("Social", com.example.assistant.DeviceLearningEngine.classifyApp("Instagram", "com.instagram.android"))
+        assertEquals("System", com.example.assistant.DeviceLearningEngine.classifyApp("Clock", "com.google.android.deskclock"))
+    }
 }

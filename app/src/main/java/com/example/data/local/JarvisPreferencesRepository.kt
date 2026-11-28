@@ -55,7 +55,8 @@ data class JarvisUserSettings(
     val lastDailyLearnMs: Long = 0L,
     val orbInactivityTimeoutSeconds: Int = 45,
     val keepScreenAwakeWhileActive: Boolean = true,
-    val deviceUnlockEnabled: Boolean = false
+    val deviceUnlockEnabled: Boolean = false,
+    val autoOfflineSwitchEnabled: Boolean = true
 ) {
     val operatingMode: TradingOperatingMode
         get() = when {
@@ -109,6 +110,7 @@ class JarvisPreferencesRepository(private val context: Context) {
         val ORB_INACTIVITY_SECONDS = intPreferencesKey("orb_inactivity_seconds")
         val KEEP_SCREEN_AWAKE = booleanPreferencesKey("keep_screen_awake_while_active")
         val DEVICE_UNLOCK_ENABLED = booleanPreferencesKey("device_unlock_enabled")
+        val AUTO_OFFLINE_SWITCH_ENABLED = booleanPreferencesKey("auto_offline_switch_enabled")
     }
 
     val settingsFlow: Flow<JarvisUserSettings> = context.jarvisDataStore.data.map { prefs ->
@@ -182,7 +184,8 @@ class JarvisPreferencesRepository(private val context: Context) {
             lastDailyLearnMs = prefs[Keys.LAST_DAILY_LEARN_MS] ?: 0L,
             orbInactivityTimeoutSeconds = (prefs[Keys.ORB_INACTIVITY_SECONDS] ?: 45).coerceIn(15, 300),
             keepScreenAwakeWhileActive = prefs[Keys.KEEP_SCREEN_AWAKE] ?: true,
-            deviceUnlockEnabled = prefs[Keys.DEVICE_UNLOCK_ENABLED] ?: false
+            deviceUnlockEnabled = prefs[Keys.DEVICE_UNLOCK_ENABLED] ?: false,
+            autoOfflineSwitchEnabled = prefs[Keys.AUTO_OFFLINE_SWITCH_ENABLED] ?: true
         )
     }
 
@@ -405,5 +408,9 @@ class JarvisPreferencesRepository(private val context: Context) {
 
     suspend fun setDeviceUnlockEnabled(enabled: Boolean) {
         context.jarvisDataStore.edit { it[Keys.DEVICE_UNLOCK_ENABLED] = enabled }
+    }
+
+    suspend fun setAutoOfflineSwitchEnabled(enabled: Boolean) {
+        context.jarvisDataStore.edit { it[Keys.AUTO_OFFLINE_SWITCH_ENABLED] = enabled }
     }
 }

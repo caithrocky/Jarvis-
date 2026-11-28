@@ -44,11 +44,21 @@ object SecretsConfig {
     }
 
     val nvidiaNimApiKey: String?
-        get() = cleanSecret(BuildConfig.NVIDIA_NIM_API_KEY)
-            ?: cleanSecret(runtimeCredentialStore?.getDecrypted(SecureCredentialStore.KEY_NVIDIA_NIM_API_OVERRIDE))
+        get() = cleanSecret(runtimeCredentialStore?.getDecrypted(SecureCredentialStore.KEY_NVIDIA_NIM_API_OVERRIDE))
+            ?: cleanSecret(BuildConfig.NVIDIA_NIM_API_KEY)
 
     val hasBuildConfigNvidiaNim: Boolean
         get() = cleanSecret(BuildConfig.NVIDIA_NIM_API_KEY) != null
+
+    val hasRuntimeNvidiaNimOverride: Boolean
+        get() = cleanSecret(runtimeCredentialStore?.getDecrypted(SecureCredentialStore.KEY_NVIDIA_NIM_API_OVERRIDE)) != null
+
+    val nvidiaNimKeySourceLabel: String
+        get() = when {
+            hasRuntimeNvidiaNimOverride -> "In-App Encrypted Key"
+            hasBuildConfigNvidiaNim -> "App Build Secret"
+            else -> "Not Set"
+        }
 
     val supabaseUrl: String? = null
     val supabaseAnonKey: String? = null

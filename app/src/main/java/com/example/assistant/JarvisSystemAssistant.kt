@@ -81,7 +81,11 @@ enum class SystemIntentKind {
     UNLOCK_DEVICE,
     SCHEDULE_TASK,
     LIST_AUTOMATIONS,
-    CANCEL_AUTOMATION
+    CANCEL_AUTOMATION,
+    DEVICE_SETTING_CONTROL,
+    MULTI_TOUCH,
+    FREE_ROAM_SCROLL,
+    DELEGATE_CAPABILITY
 }
 
 data class ParsedSystemCommand(
@@ -126,11 +130,13 @@ object JarvisSystemAssistant {
 
     private val deviceSettingKeywords = setOf(
         "wifi", "wi-fi", "bluetooth", "display", "brightness", "sound", "volume",
-        "battery", "location", "gps", "assistant", "security", "privacy",
+        "battery", "battery saver", "location", "gps", "assistant", "security", "privacy",
         "accessibility", "overlay", "storage", "apps", "all apps", "notifications",
         "date", "time", "language", "developer", "network", "mobile data", "internet",
         "general", "system", "device", "nfc", "vpn", "cast", "hotspot", "tethering",
-        "accounts", "keyboard", "about", "about phone", "dark theme", "night display"
+        "accounts", "keyboard", "about", "about phone", "dark theme", "dark mode",
+        "night display", "airplane", "airplane mode", "flight mode", "auto rotate",
+        "auto-rotate", "do not disturb", "dnd"
     )
 
     private val platformKeys = setOf(
@@ -304,7 +310,7 @@ object JarvisSystemAssistant {
     }
 
     private val compoundActionLeadRegex = Regex(
-        "^(?:please\\s+)?(?:open|launch|start|run|go\\s+to|visit|sign|log|fill|autofill|auto-fill|enter|use|type|write|search|find|look\\s+up|tap|click|press|scroll|swipe|guide|read|set|enable|turn|show|close|hide|minimize|like|love|repost|retweet|share|save|bookmark|follow|subscribe|next|text|message|dm|send\\s+(?:a\\s+)?(?:text|message|dm)|study|check|verify)\\b",
+        "^(?:please\\s+)?(?:open|launch|start|run|go\\s+to|visit|sign|log|fill|autofill|auto-fill|enter|use|type|write|search|find|look\\s+up|tap|click|press|scroll|pan|swipe|zoom|pinch|guide|read|set|enable|disable|toggle|turn|show|close|shut|exit|hide|minimize|like|love|repost|retweet|share|save|bookmark|follow|subscribe|next|text|message|dm|send\\s+(?:a\\s+)?(?:text|message|dm)|study|check|verify)\\b",
         RegexOption.IGNORE_CASE
     )
 
@@ -523,7 +529,7 @@ object JarvisSystemAssistant {
             return ParsedSystemCommand(SystemIntentKind.ENABLE_ALL_MODES)
         }
 
-        // 1b. Device Power & Lock/Unlock Voice Controls (checked before Orb sleep or generic Open App)
+        // 1b. Device Power & Lock/Unlock Voice Controls (explicit + conversational phrasing)
         if (
             lower == "make the device sleep" || lower == "make device sleep" ||
             lower == "make phone sleep" || lower == "make the phone sleep" ||
@@ -532,8 +538,13 @@ object JarvisSystemAssistant {
             lower == "sleep device" || lower == "sleep the device" ||
             lower == "sleep phone" || lower == "sleep my phone" || lower == "sleep the phone" ||
             lower == "turn off screen" || lower == "turn off the screen" ||
-            lower == "lock screen" || lower == "lock my screen" ||
-            lower == "lock phone" || lower == "lock my phone" || lower == "lock the device"
+            lower == "lock screen" || lower == "lock my screen" || lower == "lock the screen" ||
+            lower == "lock phone" || lower == "lock my phone" || lower == "lock the phone" ||
+            lower == "lock device" || lower == "lock the device" || lower == "lock it" ||
+            lower == "lock it up" || lower == "secure the phone" ||
+            lower.contains("i'm done using my phone") || lower.contains("done with my phone") ||
+            lower.contains("put this phone to sleep") || lower.contains("can you lock the") ||
+            lower.contains("can you lock my")
         ) {
             return ParsedSystemCommand(SystemIntentKind.DEVICE_POWER, "sleep")
         }
@@ -700,6 +711,10 @@ object JarvisSystemAssistant {
             lower == "swipe right" -> return ParsedSystemCommand(SystemIntentKind.SOCIAL_ACTION, "swipe_right")
         }
 
+        // 3a. Multi-Touch & Free-Roam Directional Scrolling (vertical, horizontal, diagonal, continuous)
+        parseMultiTouchCommand(lower)?.let { return it }
+        parseFreeRoamScrollCommand(lower)?.let { return it }
+
         // 3b. Self-Learning, Voice Check, Daily Briefing & Visual Feedback Controls
         if (
             lower.contains("study my device") || lower.contains("study this device") ||
@@ -726,20 +741,7 @@ object JarvisSystemAssistant {
             return ParsedSystemCommand(SystemIntentKind.DAILY_BRIEFING)
         }
 
-        when {
-            lower == "show taps" || lower == "turn on taps" || lower == "enable tap indicator" ->
-                return ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, "tap", "true")
-            lower == "hide taps" || lower == "turn off taps" || lower == "disable tap indicator" ->
-                return ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, "tap", "false")
-            lower == "show highlights" || lower == "enable highlights" || lower == "highlight elements" ->
-                return ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, "highlight", "true")
-            lower == "hide highlights" || lower == "disable highlights" ->
-                return ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, "highlight", "false")
-            lower == "show scroll" || lower == "show scrolling" || lower == "show scroll indicator" ->
-                return ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, "scroll", "true")
-            lower == "hide scroll" || lower == "hide scroll indicator" ->
-                return ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, "scroll", "false")
-        }
+        parseVisualFeedbackToggleCommand(lower)?.let { return it }
 
         // 3c. Cross-Platform Targeted Messaging: "Text Alex hey on WhatsApp" / "Message Sarah on Snapchat saying ..."
         parseTextContactCommand(trimmed)?.let { return it }
@@ -877,14 +879,16 @@ object JarvisSystemAssistant {
             return ParsedSystemCommand(SystemIntentKind.DEVICE_STATUS)
         }
 
-        // 8. Device Settings & Specific App Settings
+        // 8. Device Settings Manipulation (Open, Close, Turn On/Off, Toggle) & Specific App Settings
+        parseDeviceSettingControl(lower)?.let { return it }
+
         val specificAppSettingsMatch = Regex(
             "^(?:please\\s+)?(?:open|go\\s+to|show|manage)\\s+(?:the\\s+)?(?:app\\s+)?settings\\s+(?:for|of)\\s+(.+)$",
             RegexOption.IGNORE_CASE
         ).find(lower)
         if (specificAppSettingsMatch != null) {
             val rawTarget = specificAppSettingsMatch.groupValues[1].trim()
-            val normalizedTarget = if (rawTarget == "wi-fi") "wifi" else rawTarget
+            val normalizedTarget = normalizeSettingName(rawTarget)
             return if (rawTarget in deviceSettingKeywords) {
                 ParsedSystemCommand(SystemIntentKind.OPEN_SETTINGS, normalizedTarget)
             } else {
@@ -898,7 +902,7 @@ object JarvisSystemAssistant {
         ).find(lower)
         if (namedSettingsMatch != null) {
             val target = namedSettingsMatch.groupValues[1].trim()
-            val normalizedTarget = if (target == "wi-fi") "wifi" else target
+            val normalizedTarget = normalizeSettingName(target)
             return when {
                 target == "jarvis" || target == "this app" -> ParsedSystemCommand(SystemIntentKind.NAVIGATE_SECTION, "settings")
                 target in deviceSettingKeywords -> ParsedSystemCommand(SystemIntentKind.OPEN_SETTINGS, normalizedTarget)
@@ -962,6 +966,12 @@ object JarvisSystemAssistant {
             val label = alarmMatch.groupValues[4].ifBlank { "JARVIS Alarm" }
             return ParsedSystemCommand(SystemIntentKind.SET_ALARM, label, hour = hour.coerceIn(0, 23), minute = minute.coerceIn(0, 59))
         }
+        if (
+            Regex("\\b(?:set|create|make|add|need|put)\\b.*\\balarm\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower) ||
+            lower == "set alarm" || lower == "alarm please" || lower == "wake me up"
+        ) {
+            return ParsedSystemCommand(SystemIntentKind.DELEGATE_CAPABILITY, "alarm", trimmed)
+        }
 
         val timerMatch = Regex("(?:set\\s+(?:a\\s+)?timer\\s+(?:for\\s+)?|timer\\s+(?:for\\s+)?)(\\d+)\\s*(second|seconds|sec|secs|minute|minutes|min|mins|hour|hours|hr|hrs)(?:\\s+(?:for|called)\\s+(.+))?").find(lower)
         if (timerMatch != null) {
@@ -974,6 +984,9 @@ object JarvisSystemAssistant {
             }.coerceAtLeast(1)
             val label = timerMatch.groupValues[3].ifBlank { "JARVIS Timer" }
             return ParsedSystemCommand(SystemIntentKind.SET_TIMER, label, durationSeconds = seconds)
+        }
+        if (Regex("\\b(?:set|start|create)\\b.*\\btimer\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)) {
+            return ParsedSystemCommand(SystemIntentKind.DELEGATE_CAPABILITY, "timer", trimmed)
         }
 
         val calMatch = Regex("(?:add|create|schedule)\\s+(?:a\\s+)?(?:calendar\\s+)?(?:event|meeting|reminder)\\s+(?:called\\s+|titled\\s+)?(.+)").find(trimmed)
@@ -1077,7 +1090,10 @@ object JarvisSystemAssistant {
             return ParsedSystemCommand(SystemIntentKind.WEB_SEARCH, searchMatch.groupValues[1].trim())
         }
 
-        // 13. Open / Launch installed app OR navigate internal JARVIS tab
+        // 13. Capability Delegation ("open my trading app", "I want to trade", "open a marketing app")
+        parseCapabilityDelegationCommand(lower, trimmed)?.let { return it }
+
+        // 14. Open / Launch installed app OR navigate internal JARVIS tab
         val openMatch = Regex("^(?:please\\s+|hey\\s+jarvis[,\\s]+)?(?:open|launch|start|run)\\s+(?:the\\s+)?(.+?)(?:\\s+app)?$", RegexOption.IGNORE_CASE).find(trimmed)
         val hasTrailingActionClause = Regex(
             "\\s+(?:and|then)\\s+(?:text|message|dm|search|find|look|sign|log|fill|scroll|like|repost|share|tap|click|type|write)\\b",
@@ -1097,7 +1113,7 @@ object JarvisSystemAssistant {
                 }
             }
             if (targetLower in deviceSettingKeywords) {
-                return ParsedSystemCommand(SystemIntentKind.OPEN_SETTINGS, targetLower)
+                return ParsedSystemCommand(SystemIntentKind.OPEN_SETTINGS, normalizeSettingName(targetLower))
             }
             return ParsedSystemCommand(SystemIntentKind.OPEN_APP, target)
         }
@@ -1108,6 +1124,195 @@ object JarvisSystemAssistant {
         }
 
         return null
+    }
+
+    internal fun normalizeSettingName(raw: String): String {
+        return when (raw.lowercase(Locale.US).trim()) {
+            "wi-fi", "wifi", "wlan" -> "wifi"
+            "bt", "bluetooth" -> "bluetooth"
+            "mobile data", "cellular data", "data", "internet", "network" -> "mobile data"
+            "hotspot", "tethering", "mobile hotspot" -> "hotspot"
+            "dark mode", "dark theme", "night mode", "night display" -> "dark theme"
+            "airplane", "airplane mode", "flight mode" -> "airplane mode"
+            "battery saver", "power saving", "battery" -> "battery"
+            "gps", "location" -> "location"
+            "auto rotate", "auto-rotate", "rotation", "screen rotation" -> "auto rotate"
+            "dnd", "do not disturb" -> "do not disturb"
+            "nfc" -> "nfc"
+            "sound", "volume", "audio", "ringer" -> "sound"
+            "display", "brightness", "screen brightness" -> "brightness"
+            "all apps", "apps" -> "apps"
+            else -> raw.lowercase(Locale.US).trim()
+        }
+    }
+
+    internal fun parseMultiTouchCommand(lower: String): ParsedSystemCommand? {
+        if (Regex("^(?:please\\s+)?(?:zoom\\s+in|pinch\\s+out|spread\\s+fingers|magnify\\s+screen)(?:\\s+(?:a\\s+lot|more))?$", RegexOption.IGNORE_CASE).matches(lower)) {
+            val intensity = if (lower.contains("lot") || lower.contains("more")) "1.3" else "1.0"
+            return ParsedSystemCommand(SystemIntentKind.MULTI_TOUCH, "pinch_out", intensity)
+        }
+        if (Regex("^(?:please\\s+)?(?:zoom\\s+out|pinch\\s+in|pinch\\s+zoom\\s+out)(?:\\s+(?:a\\s+lot|more))?$", RegexOption.IGNORE_CASE).matches(lower)) {
+            val intensity = if (lower.contains("lot") || lower.contains("more")) "1.3" else "1.0"
+            return ParsedSystemCommand(SystemIntentKind.MULTI_TOUCH, "pinch_in", intensity)
+        }
+        val twoFingerScrollMatch = Regex(
+            "^(?:please\\s+)?two[- ]finger\\s+(?:scroll|swipe|pan)\\s+(up|down|left|right)$",
+            RegexOption.IGNORE_CASE
+        ).find(lower)
+        if (twoFingerScrollMatch != null) {
+            return ParsedSystemCommand(
+                SystemIntentKind.MULTI_TOUCH,
+                "two_finger_scroll_${twoFingerScrollMatch.groupValues[1].lowercase(Locale.US)}"
+            )
+        }
+        val multiTapMatch = Regex(
+            "^(?:please\\s+)?(two|2|three|3|four|4)[- ]finger\\s+tap$",
+            RegexOption.IGNORE_CASE
+        ).find(lower)
+        if (multiTapMatch != null) {
+            val count = when (multiTapMatch.groupValues[1].lowercase(Locale.US)) {
+                "3", "three" -> "3"
+                "4", "four" -> "4"
+                else -> "2"
+            }
+            return ParsedSystemCommand(SystemIntentKind.MULTI_TOUCH, "multi_finger_tap", count)
+        }
+        return null
+    }
+
+    internal fun parseFreeRoamScrollCommand(lower: String): ParsedSystemCommand? {
+        if (
+            lower == "stop scrolling" || lower == "stop scroll" || lower == "halt scrolling" ||
+            lower == "pause scrolling" || lower == "stop panning"
+        ) {
+            return ParsedSystemCommand(SystemIntentKind.FREE_ROAM_SCROLL, "stop", "single")
+        }
+        if (lower == "scroll to top" || lower == "scroll to the top" || lower == "go to top" || lower == "jump to top") {
+            return ParsedSystemCommand(SystemIntentKind.FREE_ROAM_SCROLL, "top", "single")
+        }
+        if (lower == "scroll to bottom" || lower == "scroll to the bottom" || lower == "go to bottom" || lower == "jump to bottom") {
+            return ParsedSystemCommand(SystemIntentKind.FREE_ROAM_SCROLL, "bottom", "single")
+        }
+
+        val continuous = lower.contains("keep scrolling") || lower.contains("continuously") ||
+            lower.contains("continuous scroll") || lower.contains("auto scroll") || lower.contains("autoscroll")
+        val modifier = when {
+            continuous -> "continuous"
+            lower.contains("fast") || lower.contains("far") || lower.contains("a lot") -> "fast"
+            lower.contains("slow") || lower.contains("slightly") || lower.contains("little") -> "slow"
+            else -> "single"
+        }
+
+        val dirMatch = Regex(
+            "^(?:please\\s+)?(?:keep\\s+scrolling|continuously\\s+scroll|continuous\\s+scroll|auto[- ]?scroll|free[- ]?roam\\s+scroll|scroll|pan)(?:\\s+diagonally)?\\s+(up[- ]?left|up\\s+and\\s+left|up[- ]?right|up\\s+and\\s+right|down[- ]?left|down\\s+and\\s+left|down[- ]?right|down\\s+and\\s+right|left|right|up|down)(?:\\s+(?:slowly|fast|a\\s+lot|far|slightly|a\\s+little|continuously))?$",
+            RegexOption.IGNORE_CASE
+        ).find(lower) ?: return null
+
+        val rawDir = dirMatch.groupValues[1].lowercase(Locale.US)
+            .replace(" and ", "_")
+            .replace('-', '_')
+            .replace(' ', '_')
+        return ParsedSystemCommand(SystemIntentKind.FREE_ROAM_SCROLL, rawDir, modifier)
+    }
+
+    internal fun parseVisualFeedbackToggleCommand(lower: String): ParsedSystemCommand? {
+        val showTap = lower == "show taps" || lower == "show tap" || lower == "show tap ripples" ||
+            lower == "enable show tap" || lower == "turn on show tap" || lower == "turn on taps" ||
+            lower == "enable tap indicators"
+        if (showTap) return ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, "tap", "true")
+
+        val hideTap = lower == "hide taps" || lower == "hide tap" || lower == "disable show tap" ||
+            lower == "turn off show tap" || lower == "turn off taps" || lower == "disable tap indicators"
+        if (hideTap) return ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, "tap", "false")
+
+        val showHighlight = lower == "show highlights" || lower == "highlight targets" ||
+            lower == "enable highlight indicators" || lower == "turn on highlights"
+        if (showHighlight) return ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, "highlight", "true")
+
+        val hideHighlight = lower == "hide highlights" || lower == "disable highlight indicators" ||
+            lower == "turn off highlights"
+        if (hideHighlight) return ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, "highlight", "false")
+
+        val showScroll = lower == "show scroll" || lower == "show scrolling" ||
+            lower == "show scroll indicators" || lower == "enable show scrolling" ||
+            lower == "turn on show scrolling" || lower == "turn on scroll indicators"
+        if (showScroll) return ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, "scroll", "true")
+
+        val hideScroll = lower == "hide scroll" || lower == "hide scrolling" ||
+            lower == "hide scroll indicators" || lower == "disable show scrolling" ||
+            lower == "turn off show scrolling" || lower == "turn off scroll indicators"
+        if (hideScroll) return ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, "scroll", "false")
+
+        return null
+    }
+
+    internal fun parseDeviceSettingControl(lower: String): ParsedSystemCommand? {
+        // 1. Close settings / specific setting screen: "close wifi settings", "exit settings", "shut bluetooth settings"
+        val closeMatch = Regex(
+            "^(?:please\\s+)?(?:close|shut|exit|dismiss|leave)\\s+(?:the\\s+)?(?:(.+?)\\s+)?settings(?:\\s+(?:screen|panel|page|app))?$",
+            RegexOption.IGNORE_CASE
+        ).find(lower)
+        if (closeMatch != null) {
+            val rawSetting = closeMatch.groupValues[1].trim()
+            if (rawSetting == "jarvis") return null
+            val norm = if (rawSetting.isBlank()) "general" else normalizeSettingName(rawSetting)
+            return ParsedSystemCommand(SystemIntentKind.DEVICE_SETTING_CONTROL, norm, "close")
+        }
+
+        // 2. Toggle / Enable / Disable / Turn On / Turn Off device settings (wifi, bluetooth, hotspot, dark mode, etc.)
+        val toggleMatch = Regex(
+            "^(?:please\\s+)?(turn\\s+on|turn\\s+off|switch\\s+on|switch\\s+off|enable|disable|toggle)\\s+(?:the\\s+)?(wi-fi|wifi|wlan|bluetooth|mobile\\s+data|cellular\\s+data|data|hotspot|mobile\\s+hotspot|tethering|dark\\s+mode|dark\\s+theme|night\\s+display|battery\\s+saver|power\\s+saving|airplane\\s+mode|flight\\s+mode|location|gps|nfc|auto[- ]?rotate|screen\\s+rotation|do\\s+not\\s+disturb|dnd)(?:\\s+settings?)?$",
+            RegexOption.IGNORE_CASE
+        ).find(lower)
+        if (toggleMatch != null) {
+            val verb = toggleMatch.groupValues[1].lowercase(Locale.US)
+            val norm = normalizeSettingName(toggleMatch.groupValues[2])
+            val action = when {
+                verb.contains("on") || verb == "enable" -> "on"
+                verb.contains("off") || verb == "disable" -> "off"
+                else -> "toggle"
+            }
+            return ParsedSystemCommand(SystemIntentKind.DEVICE_SETTING_CONTROL, norm, action)
+        }
+
+        // 3. Conversational screen brightness / sound cues
+        if (lower.contains("too bright") || lower.contains("lower brightness") || lower.contains("dim the screen")) {
+            return ParsedSystemCommand(SystemIntentKind.DEVICE_SETTING_CONTROL, "brightness", "open")
+        }
+        if (lower.contains("too dark") || lower.contains("increase brightness") || lower.contains("make screen brighter")) {
+            return ParsedSystemCommand(SystemIntentKind.DEVICE_SETTING_CONTROL, "brightness", "open")
+        }
+        return null
+    }
+
+    internal fun parseCapabilityDelegationCommand(lower: String, original: String): ParsedSystemCommand? {
+        val categoryOpenMatch = Regex(
+            "^(?:please\\s+)?(?:open|launch|start|use|find)\\s+(?:a|an|my|the|some)?\\s*(trading|forex|crypto|marketing|advertisement|ad|entertainment|streaming|movie|movies|music|conversation|chat|messaging|social|finance|clock|alarm|timer|calendar|notes|document)\\s+(?:app|apps|software|tool|platform)s?$",
+            RegexOption.IGNORE_CASE
+        ).find(lower)
+        if (categoryOpenMatch != null) {
+            val rawCat = categoryOpenMatch.groupValues[1].lowercase(Locale.US)
+            val normalizedCat = when (rawCat) {
+                "forex", "crypto" -> "trading"
+                "advertisement", "ad" -> "marketing"
+                "streaming", "movie", "movies", "music" -> "entertainment"
+                "conversation", "chat" -> "messaging"
+                "clock" -> "alarm"
+                "document" -> "productivity"
+                else -> rawCat
+            }
+            return ParsedSystemCommand(SystemIntentKind.DELEGATE_CAPABILITY, normalizedCat, original)
+        }
+
+        return when {
+            Regex("\\b(?:i\\s+want\\s+to\\s+trade|open\\s+my\\s+chart|start\\s+trading)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower) ->
+                ParsedSystemCommand(SystemIntentKind.DELEGATE_CAPABILITY, "trading", original)
+            Regex("\\b(?:i\\s+want\\s+to\\s+watch\\s+a\\s+movie|watch\\s+movies|stream\\s+something)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower) ->
+                ParsedSystemCommand(SystemIntentKind.DELEGATE_CAPABILITY, "entertainment", original)
+            Regex("\\b(?:design\\s+a\\s+(?:marketing|poster|flyer|banner)|run\\s+a\\s+marketing\\s+campaign|edit\\s+a\\s+promo)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower) ->
+                ParsedSystemCommand(SystemIntentKind.DELEGATE_CAPABILITY, "marketing", original)
+            else -> null
+        }
     }
 
     internal fun parseTextContactCommand(
@@ -1419,6 +1624,32 @@ object JarvisSystemAssistant {
                 }
                 "LIST_AUTOMATIONS" -> commands.add(ParsedSystemCommand(SystemIntentKind.LIST_AUTOMATIONS))
                 "CANCEL_AUTOMATION" -> commands.add(ParsedSystemCommand(SystemIntentKind.CANCEL_AUTOMATION, parts.firstOrNull().orEmpty()))
+                "DEVICE_SETTING" -> {
+                    val setting = normalizeSettingName(parts.getOrNull(0).orEmpty().ifBlank { "general" })
+                    val mode = parts.getOrNull(1)?.lowercase(Locale.US)?.ifBlank { "open" } ?: "open"
+                    commands.add(ParsedSystemCommand(SystemIntentKind.DEVICE_SETTING_CONTROL, setting, mode))
+                }
+                "MULTI_TOUCH" -> {
+                    val mode = parts.getOrNull(0)?.lowercase(Locale.US)?.ifBlank { "pinch_out" } ?: "pinch_out"
+                    val arg = parts.getOrElse(1) { "1.0" }
+                    commands.add(ParsedSystemCommand(SystemIntentKind.MULTI_TOUCH, mode, arg))
+                }
+                "FREE_SCROLL" -> {
+                    val dir = parts.getOrNull(0)?.lowercase(Locale.US)?.ifBlank { "down" } ?: "down"
+                    val mode = parts.getOrElse(1) { "single" }.lowercase(Locale.US)
+                    commands.add(ParsedSystemCommand(SystemIntentKind.FREE_ROAM_SCROLL, dir, mode))
+                }
+                "VISUAL_FEEDBACK" -> {
+                    val target = parts.getOrNull(0)?.lowercase(Locale.US)?.ifBlank { "tap" } ?: "tap"
+                    val rawState = parts.getOrElse(1) { "on" }.lowercase(Locale.US)
+                    val enabled = rawState in setOf("on", "true", "enable", "enabled", "show", "yes")
+                    commands.add(ParsedSystemCommand(SystemIntentKind.VISUAL_FEEDBACK_TOGGLE, target, enabled.toString()))
+                }
+                "DELEGATE_CAPABILITY" -> {
+                    val cap = parts.getOrNull(0)?.lowercase(Locale.US)?.ifBlank { "general" } ?: "general"
+                    val goal = parts.getOrElse(1) { cap }
+                    commands.add(ParsedSystemCommand(SystemIntentKind.DELEGATE_CAPABILITY, cap, goal))
+                }
             }
         }
         val cleaned = rawReply
@@ -1768,6 +1999,60 @@ object JarvisSystemAssistant {
                     actionLabel = "Clock"
                 )
             }
+            SystemIntentKind.MULTI_TOUCH -> {
+                val svc = JarvisAccessibilityService.activeInstance()
+                if (svc == null) {
+                    SystemExecutionResult(
+                        handled = true,
+                        replyText = "Turn on Screen Helper in Home or Settings first, Sir, so I can perform multi-touch gestures.",
+                        actionLabel = "Screen Helper Needed"
+                    )
+                } else {
+                    val mode = command.primaryArg.lowercase(Locale.US)
+                    val outcome = when {
+                        mode == "pinch_out" || mode == "zoom_in" ->
+                            svc.performPinchZoom(zoomIn = true, intensity = command.secondaryArg.toFloatOrNull() ?: 1.0f)
+                        mode == "pinch_in" || mode == "zoom_out" ->
+                            svc.performPinchZoom(zoomIn = false, intensity = command.secondaryArg.toFloatOrNull() ?: 1.0f)
+                        mode.startsWith("two_finger_scroll_") ->
+                            svc.performTwoFingerScroll(mode.removePrefix("two_finger_scroll_"))
+                        mode == "multi_finger_tap" ->
+                            svc.performMultiFingerTap(command.secondaryArg.toIntOrNull() ?: 2)
+                        else -> svc.performMultiFingerTap(2)
+                    }
+                    SystemExecutionResult(true, outcome.message, "Multi-Touch", outcome.success)
+                }
+            }
+            SystemIntentKind.FREE_ROAM_SCROLL -> {
+                val svc = JarvisAccessibilityService.activeInstance()
+                if (svc == null) {
+                    SystemExecutionResult(
+                        handled = true,
+                        replyText = "Turn on Screen Helper in Home or Settings first, Sir, so I can free-roam scroll.",
+                        actionLabel = "Screen Helper Needed"
+                    )
+                } else {
+                    val mode = command.secondaryArg.lowercase(Locale.US)
+                    val continuous = mode == "continuous"
+                    val distance = when (mode) {
+                        "fast" -> 0.72f
+                        "slow" -> 0.34f
+                        else -> 0.55f
+                    }
+                    val duration = when (mode) {
+                        "fast" -> 210L
+                        "slow" -> 480L
+                        else -> 320L
+                    }
+                    val outcome = svc.scrollFreeRoam(
+                        direction = command.primaryArg,
+                        distanceFraction = distance,
+                        durationMs = duration,
+                        continuous = continuous
+                    )
+                    SystemExecutionResult(true, outcome.message, "Free-Roam Scroll", outcome.success)
+                }
+            }
             else -> SystemExecutionResult(handled = false, replyText = "", actionLabel = "")
         }
     }
@@ -2040,7 +2325,7 @@ object JarvisSystemAssistant {
     }
 
     private fun openSystemSettings(context: Context, target: String): SystemExecutionResult {
-        val lower = target.lowercase(Locale.US).trim()
+        val lower = normalizeSettingName(target)
         val intent = when (lower) {
             "wifi", "wi-fi" -> Intent(Settings.ACTION_WIFI_SETTINGS)
             "bluetooth" -> Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
@@ -2072,6 +2357,8 @@ object JarvisSystemAssistant {
             "about", "about phone" -> Intent(Settings.ACTION_DEVICE_INFO_SETTINGS)
             "hotspot", "tethering" -> Intent(Settings.ACTION_WIRELESS_SETTINGS)
             "dark theme", "night display" -> Intent(Settings.ACTION_DISPLAY_SETTINGS)
+            "airplane mode" -> Intent(Settings.ACTION_AIRPLANE_MODE_SETTINGS)
+            "do not disturb" -> Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
             else -> Intent(Settings.ACTION_SETTINGS)
         }
         return launchIntent(
@@ -2081,6 +2368,103 @@ object JarvisSystemAssistant {
             failureReply = "Unable to open ${target.ifBlank { "system" }} settings on this device, Sir.",
             actionLabel = "System Settings"
         )
+    }
+
+    fun openSettingPanelForModification(context: Context, setting: String): SystemExecutionResult {
+        val norm = normalizeSettingName(setting)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val panelAction = when (norm) {
+                "wifi" -> Settings.Panel.ACTION_WIFI
+                "mobile data", "airplane mode" -> Settings.Panel.ACTION_INTERNET_CONNECTIVITY
+                "nfc" -> Settings.Panel.ACTION_NFC
+                "sound" -> Settings.Panel.ACTION_VOLUME
+                else -> null
+            }
+            if (panelAction != null) {
+                val res = launchIntent(
+                    context = context,
+                    intent = Intent(panelAction),
+                    successReply = "Opened quick $norm control panel, Sir.",
+                    failureReply = "",
+                    actionLabel = "Settings Panel"
+                )
+                if (res.launchedTarget) return res
+            }
+        }
+        return openSystemSettings(context, norm)
+    }
+
+    fun resolveSettingKeywords(setting: String): List<String> {
+        return when (normalizeSettingName(setting)) {
+            "wifi" -> listOf("wi-fi", "wifi", "use wi-fi", "wlan")
+            "bluetooth" -> listOf("bluetooth", "use bluetooth")
+            "mobile data" -> listOf("mobile data", "cellular data", "sim", "data")
+            "hotspot" -> listOf("hotspot", "wi-fi hotspot", "tethering")
+            "dark theme" -> listOf("dark theme", "dark mode", "dark")
+            "battery" -> listOf("battery saver", "use battery saver", "power saving")
+            "airplane mode" -> listOf("airplane mode", "flight mode")
+            "location" -> listOf("use location", "location")
+            "nfc" -> listOf("nfc", "use nfc")
+            "auto rotate" -> listOf("auto-rotate screen", "auto-rotate", "auto rotate")
+            "do not disturb" -> listOf("do not disturb", "dnd")
+            else -> listOf(setting.lowercase(Locale.US))
+        }
+    }
+
+    fun hasInstalledCapabilityHandler(context: Context, capability: String): Boolean {
+        val pm = context.packageManager
+        val intent = when (capability.lowercase(Locale.US)) {
+            "alarm" -> Intent(AlarmClock.ACTION_SHOW_ALARMS)
+            "timer" -> Intent(AlarmClock.ACTION_SET_TIMER)
+            "calendar" -> Intent(Intent.ACTION_INSERT).setData(CalendarContract.Events.CONTENT_URI)
+            else -> return true
+        }
+        return runCatching {
+            val primaryOk = intent.resolveActivity(pm) != null
+            if (primaryOk) return@runCatching true
+            if (capability.equals("alarm", ignoreCase = true)) {
+                Intent(AlarmClock.ACTION_SET_ALARM).resolveActivity(pm) != null
+            } else false
+        }.getOrDefault(false)
+    }
+
+    fun openCapabilityHandler(context: Context, capability: String, labelHint: String = ""): SystemExecutionResult {
+        val cap = capability.lowercase(Locale.US).trim()
+        return when (cap) {
+            "alarm" -> {
+                val showAlarms = Intent(AlarmClock.ACTION_SHOW_ALARMS)
+                val showTry = launchIntent(
+                    context = context,
+                    intent = showAlarms,
+                    successReply = "Opening your Clock alarms, Sir — tell me what time to set or tap + to add one.",
+                    failureReply = "",
+                    actionLabel = "Clock Alarms"
+                )
+                if (showTry.launchedTarget) showTry else launchInstalledApp(context, "Clock")
+            }
+            "timer" -> {
+                val launchClock = launchInstalledApp(context, "Clock")
+                if (launchClock.launchedTarget) {
+                    launchClock.copy(replyText = "Opening your Clock timer, Sir — tell me how many minutes or seconds.")
+                } else {
+                    SystemExecutionResult(true, "No timer app is installed on this device, Sir.", "Missing App", false)
+                }
+            }
+            "calendar" -> {
+                val calIntent = Intent(Intent.ACTION_INSERT).apply {
+                    data = CalendarContract.Events.CONTENT_URI
+                    if (labelHint.isNotBlank()) putExtra(CalendarContract.Events.TITLE, labelHint)
+                }
+                launchIntent(
+                    context = context,
+                    intent = calIntent,
+                    successReply = "Opening your Calendar app, Sir.",
+                    failureReply = "No Calendar app is installed on this device, Sir.",
+                    actionLabel = "Calendar"
+                )
+            }
+            else -> SystemExecutionResult(false, "", "", false)
+        }
     }
 
     fun buildSystemTelemetryReport(context: Context): String {
@@ -2105,7 +2489,7 @@ object JarvisSystemAssistant {
             "${(cur * 100) / max}%"
         } ?: "Unknown"
 
-        val screenHelper = if (JarvisAccessibilityService.isConnected.value) "Active" else "Off"
+        val screenHelper = AccessibilityDiagnostics.healthState.value.label
         val timeStr = SimpleDateFormat("h:mm a, EEE MMM d", Locale.getDefault()).format(Date())
         val batText = batteryPct?.let { "$it%${if (isCharging) " (Charging)" else ""}" } ?: "Unavailable"
         return "System telemetry, Sir: Battery $batText, Network $networkLabel, Media Volume $mediaVol, Screen Helper $screenHelper, Local Time $timeStr."

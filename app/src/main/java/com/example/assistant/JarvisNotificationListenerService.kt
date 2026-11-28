@@ -106,12 +106,13 @@ class JarvisNotificationListenerService : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         if (sbn == null) return
-        captureSbn(sbn)
+        runCatching { captureSbn(sbn) }
+            .onFailure { AccessibilityDiagnostics.recordNonFatalError("NotificationListener.posted", it) }
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
         if (sbn != null) {
-            NotificationVaultBridge.removeByKey(sbn.key)
+            runCatching { NotificationVaultBridge.removeByKey(sbn.key) }
         }
     }
 
